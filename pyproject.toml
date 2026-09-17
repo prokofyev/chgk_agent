@@ -1,0 +1,64 @@
+[project]
+name = "chgk-agent"
+version = "0.1.0"
+description = "RAG-поиск вопросов ЧГК на GigaChat"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "nicegui>=2.0",
+    "langgraph>=0.2",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "pgvector>=0.3",
+    "alembic>=1.14",
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.3",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "prometheus-client>=0.21",
+    "structlog>=24.4",
+    "langchain-gigachat>=0.3",
+    "tenacity>=9.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+chgk-parse = "chgk_agent.ingestion.cli:main"
+chgk-import = "chgk_agent.ingestion.import_cli:main"
+chgk-reindex = "chgk_agent.embeddings.cli:main"
+chgk-eval = "chgk_agent.search.eval_cli:main"
+chgk-serve = "chgk_agent.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chgk_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: тесты, требующие локального PostgreSQL с pgvector (пропускаются, если база недоступна)",
+]
+filterwarnings = ["error::DeprecationWarning:chgk_agent.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
