@@ -2,17 +2,50 @@
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 DEFAULT_USER_AGENT = "chgk-agent/0.1 (+https://localhost/chgk-agent)"
+TEST_DATABASE_SUFFIX = "_test"
+
+
+def derive_test_dsn(dsn: str) -> str:
+    """Вывести адрес тестовой базы из адреса рабочей.
+
+    Имя базы получает суффикс `_test`, остальные части адреса — сервер,
+    порт, пользователь — сохраняются. Пароль возвращается как есть: строка
+    попадает только в настройки тестового окружения.
+    """
+
+    url = make_url(dsn)
+    if not url.database:
+        raise ValueError("в DSN не указано имя базы")
+    return url.set(database=f"{url.database}{TEST_DATABASE_SUFFIX}").render_as_string(
+        hide_password=False
+    )
 
 
 class DatabaseSettings(BaseSettings):
     """Параметры подключения к PostgreSQL с pgvector."""
 
     dsn: str = "postgresql+asyncpg://prokofyev@localhost:5432/chgk_agent"
+    test_dsn: str | None = None
+    """Адрес базы для интеграционных тестов.
+
+    По умолчанию выводится из `dsn` заменой имени базы на `<имя>_test`,
+    чтобы тесты не могли писать в рабочую базу.
+    """
+
     echo: bool = False
+
+    @model_validator(mode="after")
+    def _fill_test_dsn(self) -> "DatabaseSettings":
+        """Подставить выведенный адрес тестовой базы, если он не задан."""
+
+        if self.test_dsn is None:
+            self.test_dsn = derive_test_dsn(self.dsn)
+        return self
 
 
 class GigaChatSettings(BaseSettings):

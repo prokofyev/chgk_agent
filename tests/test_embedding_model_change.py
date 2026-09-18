@@ -25,11 +25,11 @@ from chgk_agent.embeddings.validation import (
 )
 from chgk_agent.ingestion.service import IngestionService
 from chgk_agent.search.local import LocalSearch
+from db_setup import DatabaseSetupUnavailable, disposable_database
 
 pytestmark = pytest.mark.integration
 
 FIXTURE = Path(__file__).parent / "fixtures" / "telegram_export.html"
-PROBE_DATABASE = "chgk_agent_dim_probe"
 ALTERNATIVE_DIM = 384
 DIMENSION = get_embedding_dim()
 
@@ -64,10 +64,42 @@ class _VocabularyEmbedder:
         return vector
 
 
-def _psql(*statements: str) -> subprocess.CompletedProcess[str]:
-    """Выполнить SQL от имени текущего пользователя."""
+def test_migration_uses_configured_embedding_dimension() -> None:
+    """Схема создаётся под размерность из конфигурации, а не под зашитую."""
 
-    return subprocess.run(
+    settings = Settings(_env_file=None)
+    shutil.which("psql") or pytest.skip("psql недоступен")
+
+    try:
+        with disposable_database(
+            settings.database.test_dsn, embedding_dim=ALTERNATIVE_DIM
+        ) as plan:
+            column = subprocess.run(
+                [
+                    "psql",
+                    "-h",
+                    "localhost",
+                    "-p",
+                    "5432",
+                    "-U",
+                    os.environ.get("USER", "postgres"),
+                    "-d",
+                    plan.database,
+                    "-tAc",
+                    "SELECT format_type(a.atttypid, a.atttypmod) "
+                    "FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid "
+                    "WHERE c.relname = 'questions' AND a.attname = 'embedding'",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            assert column.stdout.strip() == f"vector({ALTERNATIVE_DIM})"
+            created = plan.database
+    except DatabaseSetupUnavailable as error:
+        pytest.skip(str(error))
+
+    remaining = subprocess.run(
         [
             "psql",
             "-h",
@@ -78,73 +110,13 @@ def _psql(*statements: str) -> subprocess.CompletedProcess[str]:
             os.environ.get("USER", "postgres"),
             "-d",
             "postgres",
-            "-v",
-            "ON_ERROR_STOP=1",
-            *[argument for statement in statements for argument in ("-c", statement)],
+            "-tAc",
+            f"SELECT count(*) FROM pg_database WHERE datname = '{created}'",
         ],
         capture_output=True,
         text=True,
-        check=True,
     )
-
-
-def test_migration_uses_configured_embedding_dimension(tmp_path: Path) -> None:
-    """Схема создаётся под размерность из конфигурации, а не под зашитую."""
-
-    shutil.which("psql") or pytest.skip("psql недоступен")
-    project_root = Path(__file__).resolve().parent.parent
-
-    try:
-        _psql(
-            f'DROP DATABASE IF EXISTS "{PROBE_DATABASE}"',
-            f'CREATE DATABASE "{PROBE_DATABASE}"',
-        )
-    except subprocess.CalledProcessError as error:  # pragma: no cover
-        pytest.skip(f"нет прав на создание базы: {error.stderr}")
-
-    dsn = (
-        f"postgresql+asyncpg://{os.environ.get('USER', 'postgres')}"
-        f"@localhost:5432/{PROBE_DATABASE}"
-    )
-    environment = {
-        **os.environ,
-        "CHGK_DATABASE__DSN": dsn,
-        "CHGK_GIGACHAT__EMBEDDING_DIM": str(ALTERNATIVE_DIM),
-    }
-
-    try:
-        migration = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "head"],
-            cwd=project_root,
-            env=environment,
-            capture_output=True,
-            text=True,
-        )
-        assert migration.returncode == 0, migration.stderr
-
-        column = subprocess.run(
-            [
-                "psql",
-                "-h",
-                "localhost",
-                "-p",
-                "5432",
-                "-U",
-                os.environ.get("USER", "postgres"),
-                "-d",
-                PROBE_DATABASE,
-                "-tAc",
-                "SELECT format_type(a.atttypid, a.atttypmod) "
-                "FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid "
-                "WHERE c.relname = 'questions' AND a.attname = 'embedding'",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert column.stdout.strip() == f"vector({ALTERNATIVE_DIM})"
-    finally:
-        _psql(f'DROP DATABASE IF EXISTS "{PROBE_DATABASE}" WITH (FORCE)')
+    assert remaining.stdout.strip() == "0"
 
 
 @pytest.fixture

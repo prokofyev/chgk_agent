@@ -6,6 +6,13 @@ from pydantic import ValidationError
 from chgk_agent.config import Settings
 
 
+@pytest.fixture(autouse=True)
+def _clear_test_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Убрать влияние окружения на проверки вывода тестового DSN."""
+
+    monkeypatch.delenv("CHGK_DATABASE__TEST_DSN", raising=False)
+
+
 def test_external_source_enabled_by_default() -> None:
     settings = Settings(_env_file=None)
 
@@ -54,3 +61,39 @@ def test_empty_user_agent_from_environment_is_rejected(
 
     locations = {error["loc"] for error in excinfo.value.errors()}
     assert ("external", "user_agent") in locations
+
+
+def test_test_dsn_is_derived_from_working_dsn() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.database.test_dsn == (
+        "postgresql+asyncpg://prokofyev@localhost:5432/chgk_agent_test"
+    )
+
+
+def test_test_dsn_preserves_server_port_and_credentials() -> None:
+    settings = Settings(
+        _env_file=None,
+        database={"dsn": "postgresql+asyncpg://user:secret@db.example:6000/questions"},
+    )
+
+    assert settings.database.test_dsn == (
+        "postgresql+asyncpg://user:secret@db.example:6000/questions_test"
+    )
+
+
+def test_test_dsn_requires_database_name() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, database={"dsn": "postgresql+asyncpg://user@host:5432"})
+
+
+def test_test_dsn_can_be_set_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "CHGK_DATABASE__TEST_DSN", "postgresql+asyncpg://user@other-host:5432/isolated"
+    )
+
+    settings = Settings(_env_file=None)
+
+    assert settings.database.test_dsn == (
+        "postgresql+asyncpg://user@other-host:5432/isolated"
+    )

@@ -20,7 +20,13 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    return get_settings().database.dsn
+    """Адрес базы: явно переданный в конфигурации либо из настроек.
+
+    Явный адрес позволяет применять миграции к тестовой базе, не меняя
+    переменные окружения процесса.
+    """
+
+    return config.get_main_option("sqlalchemy.url") or get_settings().database.dsn
 
 
 def run_migrations_offline() -> None:
