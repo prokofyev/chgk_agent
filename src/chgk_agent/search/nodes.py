@@ -14,13 +14,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chgk_agent.config import Settings
 from chgk_agent.embeddings.base import ChatProvider, EmbeddingProvider
+from chgk_agent.embeddings.text import embedding_document_text, embedding_query_text
 from chgk_agent.external.base import (
+    ExternalErrorKind,
     ExternalQuestionSource,
     ExternalSearchResult,
     ExternalStatus,
 )
 from chgk_agent.logging_setup import get_logger, get_request_id, new_request_id
 from chgk_agent.observability.metrics import Metrics, get_metrics
+from chgk_agent.search.lexical import get_corpus_index
 from chgk_agent.search.local import LocalSearch, LocalSearchOutcome
 from chgk_agent.search.merge import (
     apply_threshold,
@@ -36,6 +39,13 @@ from chgk_agent.search.models import (
     SearchMatch,
     SearchOutcome,
     SourceReport,
+)
+from chgk_agent.search.scoring import (
+    NONE_KIND,
+    CandidateScore,
+    ScoredCandidate,
+    cosine_similarity,
+    score_candidates,
 )
 
 logger = get_logger(__name__)
@@ -84,6 +94,30 @@ async def parse_request(state: dict) -> dict:
     }
 
 
+async def embed_query(state: dict, deps: SearchDeps) -> dict:
+    """Построить единый эмбеддинг описания для обеих веток поиска.
+
+    Описание нормализуется тем же правилом, что и сохраняемые вопросы, а
+    вектор считается один раз: семантическая близость локальных вопросов и
+    карточек внешнего источника измеряется одной и той же величиной, поэтому
+    второй вызов провайдера был бы и лишним, и источником расхождения.
+    """
+
+    text = embedding_query_text(state["query"])
+    try:
+        vectors = await deps.embedding_provider.embed([text])
+    except Exception as error:
+        logger.warning("эмбеддинг описания недоступен", error=str(error))
+        return {"query_text": text, "query_embedding": None, "query_embedding_error": str(error)}
+
+    embedding = list(vectors[0]) if vectors and vectors[0] else None
+    return {
+        "query_text": text,
+        "query_embedding": embedding,
+        "query_embedding_error": None if embedding else "провайдер вернул пустой эмбеддинг",
+    }
+
+
 async def local_search(state: dict, deps: SearchDeps) -> dict:
     """Выполнить локальный гибридный поиск с собственным таймаутом."""
 
@@ -98,9 +132,18 @@ async def local_search(state: dict, deps: SearchDeps) -> dict:
                 search = LocalSearch(
                     session,
                     deps.embedding_provider,
+                    query_embedding=state.get("query_embedding"),
                     use_lexical=not state.get("disable_lexical", False),
+                    lexical_candidate_limit=(
+                        deps.settings.search.lexical_candidate_limit
+                    ),
+                    semantic_candidate_limit=(
+                        deps.settings.search.semantic_fetch_limit
+                    ),
                     semantic_min_score=deps.settings.search.semantic_min_score,
-                    lexical_min_score=deps.settings.search.lexical_min_score,
+                    query_embedding_failed=bool(
+                        state.get("query_embedding_error")
+                    ) and not state.get("query_embedding"),
                 )
                 outcome = await search.search_with_diagnostics(query, limit=limit)
     except TimeoutError:
@@ -112,6 +155,10 @@ async def local_search(state: dict, deps: SearchDeps) -> dict:
             degraded=True, semantic_used=False, error=str(error)
         )
         logger.warning("локальный поиск недоступен", error=str(error))
+
+    if not outcome.lexical_used:
+        reason = "disabled" if state.get("disable_lexical") else "unavailable"
+        deps.current_metrics.search.lexical_degraded.labels(reason=reason).inc()
 
     return {"local": outcome, "local_seconds": deps.clock() - started}
 
@@ -128,9 +175,13 @@ async def external_search(state: dict, deps: SearchDeps) -> dict:
         return {"external": result, "external_seconds": deps.clock() - started}
 
     timeout = deps.settings.search.external_timeout_seconds
+    # Внешняя выдача берётся шире запрошенной: страница сайта содержит
+    # `page_limit` карточек, и все они должны пройти единую оценку, иначе
+    # сравнение шло бы только по тем, что случайно попали в короткий список.
+    limit = deps.settings.external.page_limit
     try:
         async with asyncio.timeout(timeout):
-            result = await source.search(state["query"], limit=state["limit"])
+            result = await source.search(state["query"], limit=limit)
     except TimeoutError:
         result = ExternalSearchResult(
             status=ExternalStatus.UNAVAILABLE,
@@ -144,6 +195,85 @@ async def external_search(state: dict, deps: SearchDeps) -> dict:
         logger.warning("внешний поиск недоступен", error=str(error))
 
     return {"external": result, "external_seconds": deps.clock() - started}
+
+
+async def score_external(state: dict, deps: SearchDeps) -> dict:
+    """Посчитать семантическую близость карточек внешнего источника.
+
+    Карточки приходят без векторов, а единая оценка требует одной и той же
+    величины для обоих источников. Если эмбеддинг получить не удалось, внешние
+    совпадения не показываются: подставлять вместо близости позицию сайта
+    означало бы вернуть несопоставимую шкалу в выдачу.
+    """
+
+    result: ExternalSearchResult | None = state.get("external")
+    if result is None or not result.matches:
+        return {}
+
+    embedding = state.get("query_embedding")
+    if not embedding:
+        return _fail_external_embedding(
+            result,
+            deps,
+            error=state.get("query_embedding_error") or "эмбеддинг описания недоступен",
+            reason="description_embedding_failed",
+        )
+
+    texts = [
+        embedding_document_text(match.question_text, match.answer_text)
+        for match in result.matches
+    ]
+    try:
+        vectors = await deps.embedding_provider.embed(texts)
+    except Exception as error:
+        logger.warning("эмбеддинг внешних карточек недоступен", error=str(error))
+        return _fail_external_embedding(
+            result, deps, error=str(error), reason="provider_error"
+        )
+
+    if len(vectors) != len(result.matches):
+        return _fail_external_embedding(
+            result,
+            deps,
+            error="провайдер вернул неверное число эмбеддингов карточек",
+            reason="unexpected_count",
+        )
+
+    for match, vector in zip(result.matches, vectors, strict=True):
+        match.embedding = list(vector) if vector else None
+        match.semantic_similarity = (
+            cosine_similarity(embedding, match.embedding) if match.embedding else 0.0
+        )
+
+    if any(match.embedding is None for match in result.matches):
+        return _fail_external_embedding(
+            result,
+            deps,
+            error="провайдер вернул пустой эмбеддинг карточки",
+            reason="empty_embedding",
+        )
+
+    return {"external": result}
+
+
+def _fail_external_embedding(
+    result: ExternalSearchResult,
+    deps: SearchDeps,
+    *,
+    error: str,
+    reason: str = "provider_error",
+) -> dict:
+    """Пометить внешний источник недоступным из-за сбоя эмбеддинга."""
+
+    result.status = ExternalStatus.UNAVAILABLE
+    result.error = error
+    result.error_kind = ExternalErrorKind.EMBEDDING_FAILED
+    result.matches = []
+    deps.current_metrics.search.external_embedding_failed.labels(
+        reason=reason
+    ).inc()
+    logger.warning("внешние совпадения исключены из выдачи", error=error)
+    return {"external": result}
 
 
 def merge_and_dedupe(state: dict) -> dict:
@@ -171,13 +301,79 @@ def merge_and_dedupe(state: dict) -> dict:
     return {"matches": matches, "sources": reports}
 
 
+def score_matches(state: dict, deps: SearchDeps) -> dict:
+    """Посчитать единую оценку для совпадений обоих источников.
+
+    Лексический сигнал и итоговая оценка считаются здесь, а не в ветках: BM25 —
+    функция от коллекции, и только общий узел видит кандидатов обеих сторон
+    одновременно. Нормировка насыщением выбрана вместо деления на максимум:
+    максимум зависел бы от состава выдачи, то есть от того, сколько результатов
+    вернул каждый источник.
+    """
+
+    matches: list[SearchMatch] = state.get("matches", [])
+    if not matches:
+        return {}
+
+    description = state.get("query_text") or state.get("query", "")
+    settings = deps.settings.search
+    candidates: list[ScoredCandidate] = []
+    keys: list[str] = []
+    for index, match in enumerate(matches):
+        key = match.key or f"match:{index}"
+        keys.append(key)
+        candidates.append(
+            ScoredCandidate(
+                key=key,
+                text=embedding_document_text(match.question_text, match.answer_text),
+                semantic_similarity=match.semantic_similarity,
+            )
+        )
+
+    base_index = get_corpus_index().index
+    scores = score_candidates(
+        description,
+        candidates,
+        base_index=base_index,
+        lexical_weight=settings.lexical_weight,
+        lexical_saturation=settings.lexical_saturation,
+    )
+
+    for match, key in zip(matches, keys, strict=True):
+        score = scores.get(key)
+        if score is None:
+            score = CandidateScore(
+                score=match.semantic_similarity,
+                lexical_score=0.0,
+                lexical_normalized=0.0,
+                score_kind=NONE_KIND,
+            )
+        match.score = round(score.score, 6)
+        match.lexical_score = round(score.lexical_score, 6)
+        match.score_kind = score.score_kind
+        for ref in match.sources:
+            ref.score = match.score
+            ref.score_kind = match.score_kind
+
+    return {"matches": matches}
+
+
 def rerank(state: dict) -> dict:
     """Применить порог и ограничение числа результатов."""
 
     matches = apply_threshold(
         state.get("matches", []),
         min_score=state.get("min_score", 0.0),
-        thresholds_by_kind=state.get("thresholds"),
+    )
+    # Потолок единицы может сблизить оценки, поэтому ничьи разрешаются
+    # составляющими: сначала семантика, затем лексика, и лишь потом текст.
+    matches.sort(
+        key=lambda item: (
+            -item.score,
+            -item.semantic_similarity,
+            -item.lexical_score,
+            item.question_text,
+        )
     )
     matches = limit_matches(matches, state.get("limit", 20))
     return {"matches": matches}

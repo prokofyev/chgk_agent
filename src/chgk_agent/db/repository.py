@@ -256,3 +256,13 @@ async def store_embeddings(
         stored += 1
     await session.flush()
     return stored
+
+
+async def all_question_texts(session: AsyncSession) -> list[tuple[int, str, str]]:
+    """Вернуть идентификаторы и тексты всех вопросов для лексического индекса."""
+
+    statement = select(Question.id, Question.question_text, Question.answer_text).order_by(
+        Question.id
+    )
+    rows = (await session.execute(statement)).all()
+    return [(int(row.id), row.question_text, row.answer_text) for row in rows]

@@ -20,6 +20,7 @@ from chgk_agent.models.domain import (
     ParseResult,
 )
 from chgk_agent.observability.metrics import Metrics
+from chgk_agent.search.lexical import get_corpus_index
 
 logger = get_logger(__name__)
 
@@ -175,6 +176,10 @@ class QuestionImporter:
             keep_keys=[parsed.source_key for parsed in result.questions],
         )
         await repository.delete_orphan_questions(self._session)
+
+        # Тексты вопросов изменились, поэтому кэш лексического индекса
+        # устарел: BM25 считает статистику по составу корпуса.
+        get_corpus_index().invalidate()
 
     async def _embed_pending(self) -> int:
         """Векторизовать вопросы без эмбеддинга.

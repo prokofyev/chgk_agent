@@ -16,6 +16,7 @@ from chgk_agent.embeddings.base import EmbeddingProvider
 from chgk_agent.embeddings.indexer import DEFAULT_BATCH_SIZE, embed_pending
 from chgk_agent.logging_setup import get_logger
 from chgk_agent.observability.metrics import Metrics, get_metrics
+from chgk_agent.search.lexical import get_corpus_index
 
 logger = get_logger(__name__)
 
@@ -66,6 +67,11 @@ async def reindex_once(
     if outcome.failed:
         current.ingestion.errors.labels(stage="embedding").inc(outcome.failed)
         current.ingestion.questions.labels(status="unembedded").inc(outcome.failed)
+
+    if outcome.embedded:
+        # Состав и тексты вопросов могли измениться вместе с переиндексацией,
+        # поэтому лексический индекс перестраивается следующим запросом.
+        get_corpus_index().invalidate()
 
     if outcome.embedded or outcome.failed:
         logger.info(

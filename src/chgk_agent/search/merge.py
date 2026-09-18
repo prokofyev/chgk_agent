@@ -29,6 +29,16 @@ EXTERNAL_STATUS_MAP: dict[ExternalStatus, SourceStatus] = {
 }
 
 
+EXTERNAL_KEY_PREFIX = "external:"
+
+
+def external_key(item: object) -> str:
+    """Ключ внешнего совпадения для единой оценки."""
+
+    identifier = getattr(item, "external_id", None) or getattr(item, "external_url", None)
+    return f"{EXTERNAL_KEY_PREFIX}{identifier}"
+
+
 def local_matches(outcome: LocalSearchOutcome) -> list[SearchMatch]:
     """Преобразовать результат локального поиска в общий формат."""
 
@@ -39,6 +49,8 @@ def local_matches(outcome: LocalSearchOutcome) -> list[SearchMatch]:
             comment=item.comment,
             score=item.score,
             score_kind=item.score_kind,
+            key=item.key,
+            semantic_similarity=item.semantic_similarity or 0.0,
             sources=[
                 SourceRef(
                     name=LOCAL_SOURCE,
@@ -66,12 +78,15 @@ def external_matches(result: ExternalSearchResult) -> list[SearchMatch]:
                 comment=item.comment,
                 score=item.score,
                 score_kind=item.score_kind,
+                key=external_key(item),
+                semantic_similarity=item.semantic_similarity,
                 sources=[
                     SourceRef(
                         name=EXTERNAL_SOURCE_NAME,
                         external_url=item.external_url,
                         score=item.score,
                         score_kind=item.score_kind,
+                        position=item.position or None,
                     )
                 ],
                 external_url=item.external_url,
@@ -101,6 +116,7 @@ def local_report(
         matches=matches,
         error=outcome.error if status is SourceStatus.UNAVAILABLE else None,
         error_kind="local_failure" if status is SourceStatus.UNAVAILABLE else None,
+        degraded=outcome.is_partial and status is not SourceStatus.UNAVAILABLE,
         duration_seconds=duration_seconds,
     )
 
@@ -161,6 +177,9 @@ def _combine(left: SearchMatch, right: SearchMatch) -> SearchMatch:
         score_kind=best.score_kind,
         sources=sources,
         external_url=best.external_url or left.external_url or right.external_url,
+        semantic_similarity=max(left.semantic_similarity, right.semantic_similarity),
+        lexical_score=max(left.lexical_score, right.lexical_score),
+        key=best.key or left.key or right.key,
     )
 
 
@@ -168,17 +187,15 @@ def apply_threshold(
     matches: Iterable[SearchMatch],
     *,
     min_score: float,
-    thresholds_by_kind: dict[str, float] | None = None,
 ) -> list[SearchMatch]:
-    """Отфильтровать совпадения по порогу с учётом типа оценки."""
+    """Отфильтровать совпадения по единому порогу.
 
-    thresholds = thresholds_by_kind or {}
-    kept: list[SearchMatch] = []
-    for match in matches:
-        threshold = thresholds.get(match.score_kind, min_score)
-        if match.score >= threshold:
-            kept.append(match)
-    return kept
+    Порог применяется к той же величине, по которой ранжируются оба источника.
+    Прежнее разделение порогов по типу оценки потеряло смысл: оценка теперь
+    одна, а `score_kind` обозначает происхождение совпадения.
+    """
+
+    return [match for match in matches if match.score >= min_score]
 
 
 def limit_matches(matches: list[SearchMatch], limit: int) -> list[SearchMatch]:

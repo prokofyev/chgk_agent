@@ -110,7 +110,9 @@ async def test_semantic_branch_finds_expected_question_first(
     results = await search.search("машина Тьюринга", limit=5)
 
     assert results[0].question_text == "Какой учёный предложил машину Тьюринга?"
-    assert results[0].score == 1.0
+    # Оценка — настоящая косинусная близость, а не нормированный ранг.
+    assert results[0].score == pytest.approx(results[0].semantic_similarity)
+    assert results[0].score > (results[1].score if len(results) > 1 else 0.0)
     assert results[0].score_kind == SEMANTIC_KIND
     assert results[0].answer_text == "ответ"
 
@@ -150,10 +152,10 @@ async def test_lexical_failure_degrades_to_semantic(
     await _seed(session, "Вопрос про машину Тьюринга?")
     search = LocalSearch(session, _KeywordEmbedder())
 
-    async def _broken(query: str, *, limit: int):
+    async def _broken(query: str, outcome) -> list[int]:
         raise RuntimeError("полнотекстовый индекс недоступен")
 
-    monkeypatch.setattr(search, "_lexical_branch", _broken)
+    monkeypatch.setattr(search, "_lexical_candidate_ids", _broken)
 
     outcome = await search.search_with_diagnostics("машина Тьюринга", limit=5)
 

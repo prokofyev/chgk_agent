@@ -16,6 +16,7 @@ from chgk_agent.logging_setup import get_logger, request_context
 from chgk_agent.search.models import SearchOutcome
 from chgk_agent.search.nodes import (
     SearchDeps,
+    embed_query,
     external_search,
     format_response,
     generate,
@@ -25,6 +26,8 @@ from chgk_agent.search.nodes import (
     needs_generation,
     parse_request,
     rerank,
+    score_external,
+    score_matches,
 )
 from chgk_agent.search.state import SearchState
 
@@ -32,6 +35,8 @@ logger = get_logger(__name__)
 
 LOCAL_NODE = "local_search"
 EXTERNAL_NODE = "external_search"
+EXTERNAL_SCORE_NODE = "score_external"
+SCORE_NODE = "score_matches"
 
 
 @dataclass(slots=True)
@@ -61,11 +66,6 @@ class SearchGraph:
                     "min_score": min_score,
                     "generate_answer": generate_answer,
                     "disable_lexical": disable_lexical,
-                    "thresholds": {
-                        "external_rank": (
-                            self.deps.settings.search.external_min_score
-                        ),
-                    },
                     "request_id": active_request_id,
                 }
             )
@@ -79,19 +79,25 @@ def build_search_graph(deps: SearchDeps) -> SearchGraph:
 
     builder = StateGraph(SearchState)
     builder.add_node("parse_request", parse_request)
+    builder.add_node("embed_query", partial(embed_query, deps=deps))
     builder.add_node(LOCAL_NODE, partial(local_search, deps=deps))
     builder.add_node(EXTERNAL_NODE, partial(external_search, deps=deps))
+    builder.add_node(EXTERNAL_SCORE_NODE, partial(score_external, deps=deps))
     builder.add_node("merge_and_dedupe", merge_and_dedupe)
+    builder.add_node(SCORE_NODE, partial(score_matches, deps=deps))
     builder.add_node("rerank", rerank)
     builder.add_node("generate", partial(generate, deps=deps))
     builder.add_node("format_response", partial(format_response, deps=deps))
 
     builder.add_edge(START, "parse_request")
-    builder.add_edge("parse_request", LOCAL_NODE)
-    builder.add_edge("parse_request", EXTERNAL_NODE)
-    builder.add_edge([LOCAL_NODE, EXTERNAL_NODE], "merge_and_dedupe")
+    builder.add_edge("parse_request", "embed_query")
+    builder.add_edge("embed_query", LOCAL_NODE)
+    builder.add_edge("embed_query", EXTERNAL_NODE)
+    builder.add_edge(EXTERNAL_NODE, EXTERNAL_SCORE_NODE)
+    builder.add_edge([LOCAL_NODE, EXTERNAL_SCORE_NODE], "merge_and_dedupe")
+    builder.add_edge("merge_and_dedupe", SCORE_NODE)
     builder.add_conditional_edges(
-        "merge_and_dedupe",
+        SCORE_NODE,
         has_results,
         {"rerank": "rerank", "skip": "format_response"},
     )

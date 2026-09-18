@@ -96,8 +96,23 @@ class SearchSettings(BaseSettings):
     generate_answer: bool = True
     use_lexical: bool = True
     semantic_min_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    lexical_min_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    external_min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    semantic_fetch_limit: int = Field(default=80, ge=1)
+    """Сколько кандидатов забирать из векторной ветки до объединения."""
+
+    lexical_candidate_limit: int = Field(default=200, ge=1)
+    """Сколько лексических кандидатов добирать из индекса BM25."""
+
+    lexical_weight: float = Field(default=0.15, ge=0.0)
+    """Вес лексического сигнала в итоговой оценке.
+
+    Семантическая близость задаёт основную шкалу, а BM25 добавляет к ней доли
+    единицы: на реальном корпусе нормированный BM25 лежит в 0.2..0.35, поэтому
+    больший вес уводил бы сумму за потолок, и порядок выдачи вырождался бы.
+    """
+
+    lexical_saturation: float = Field(default=10.0, gt=0)
+    """Параметр насыщения BM25 при приведении к `[0, 1)`."""
+
     local_timeout_seconds: float = Field(default=10.0, gt=0)
     external_timeout_seconds: float = Field(default=15.0, gt=0)
 

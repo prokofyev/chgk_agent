@@ -41,6 +41,8 @@ class SourceRefSchema(BaseModel):
     external_url: str | None = None
     score: float
     score_kind: str
+    position: int | None = None
+    """Позиция во внешней выдаче: диагностика, а не часть оценки."""
 
     @classmethod
     def from_domain(cls, ref: SourceRef) -> "SourceRefSchema":
@@ -52,6 +54,7 @@ class SourceRefSchema(BaseModel):
             external_url=ref.external_url,
             score=ref.score,
             score_kind=ref.score_kind,
+            position=ref.position,
         )
 
 
@@ -93,6 +96,7 @@ class SourceReportSchema(BaseModel):
     queries: list[str] = Field(default_factory=list)
     truncated: bool = False
     duration_seconds: float = 0.0
+    degraded: bool = False
 
     @classmethod
     def from_domain(cls, report: SourceReport) -> "SourceReportSchema":
@@ -108,6 +112,7 @@ class SourceReportSchema(BaseModel):
             queries=list(report.queries),
             truncated=report.truncated,
             duration_seconds=report.duration_seconds,
+            degraded=report.degraded,
         )
 
 

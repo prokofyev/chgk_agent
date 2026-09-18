@@ -70,7 +70,9 @@ async def test_non_empty_search_returns_matches() -> None:
     assert result.matches
     assert result.matches[0].external_url
     assert result.matches[0].answer_text
-    assert result.matches[0].score_kind == "external_rank"
+    # Позиция сайта остаётся диагностикой и в оценку не попадает.
+    assert result.matches[0].score_kind == ""
+    assert result.matches[0].score == 0.0
     assert result.query == "Тьюринг"
     assert result.truncated is False
 
@@ -343,7 +345,13 @@ async def test_multiple_pages_are_merged_without_duplicates() -> None:
 
 
 @respx.mock
-async def test_position_based_scores_are_monotonic() -> None:
+async def test_source_does_not_score_by_position() -> None:
+    """Источник не выставляет оценку: её считает граф по единой мере.
+
+    Позиция в выдаче остаётся диагностикой, но не участвует в ранжировании:
+    раньше она давала внешним результатам шкалу, несопоставимую с локальной.
+    """
+
     respx.get(f"{BASE_URL}/search").mock(
         return_value=httpx.Response(200, text=_fixture("search_ok.html"))
     )
@@ -351,10 +359,9 @@ async def test_position_based_scores_are_monotonic() -> None:
 
     result = await source.search("Тьюринг", limit=3)
 
-    scores = [match.score for match in result.matches]
-    assert scores == sorted(scores, reverse=True)
-    assert result.matches[0].score == 1.0
-    assert all(0.0 < score <= 1.0 for score in scores)
+    assert [match.position for match in result.matches] == [1, 2, 3]
+    assert all(match.score == 0.0 for match in result.matches)
+    assert all(match.semantic_similarity == 0.0 for match in result.matches)
 
 
 @respx.mock

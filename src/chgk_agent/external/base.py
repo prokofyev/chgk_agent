@@ -32,6 +32,7 @@ class ExternalErrorKind(StrEnum):
     UNRECOGNIZED = "unrecognized"
     CIRCUIT_OPEN = "circuit_open"
     ROBOTS_DISALLOWED = "robots_disallowed"
+    EMBEDDING_FAILED = "embedding_failed"
 
 
 @dataclass(slots=True)
@@ -48,7 +49,9 @@ class ExternalMatch:
     external_id: str | None = None
     position: int = 0
     score: float = 0.0
-    score_kind: str = "external_rank"
+    score_kind: str = ""
+    embedding: list[float] | None = None
+    semantic_similarity: float = 0.0
 
 
 @dataclass(slots=True)

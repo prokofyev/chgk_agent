@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from chgk_agent.db import repository
 from chgk_agent.db.base import Question
 from chgk_agent.embeddings.base import EmbeddingProvider
+from chgk_agent.embeddings.text import embedding_document_text
 from chgk_agent.logging_setup import get_logger
 from chgk_agent.models.domain import ParseIssue
 
@@ -35,6 +36,15 @@ class EmbeddingOutcome:
         """Число вопросов, которые остались без эмбеддинга."""
 
         return self.failed
+
+
+def embedding_texts(questions: Sequence[Question]) -> list[str]:
+    """Собрать тексты «вопрос + ответ» для векторизации."""
+
+    return [
+        embedding_document_text(question.question_text, question.answer_text)
+        for question in questions
+    ]
 
 
 def _chunk(items: Sequence[Question], size: int) -> list[list[Question]]:
@@ -91,7 +101,7 @@ async def _embed_batch(
 ) -> None:
     """Векторизовать один батч с изоляцией частичных сбоев."""
 
-    texts = [question.normalized_text for question in batch]
+    texts = embedding_texts(batch)
     try:
         vectors = await provider.embed(texts)
     except Exception as error:
@@ -139,7 +149,7 @@ async def _embed_individually(
 
     for question in batch:
         try:
-            vectors = await provider.embed([question.normalized_text])
+            vectors = await provider.embed(embedding_texts([question]))
         except Exception as error:
             _mark_failed(question, outcome, str(error))
             continue

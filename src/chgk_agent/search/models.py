@@ -37,6 +37,8 @@ class SourceReport:
     queries: list[str] = field(default_factory=list)
     truncated: bool = False
     duration_seconds: float = 0.0
+    degraded: bool = False
+    """Источник отработал, но без части сигнала, например без лексики."""
 
 
 @dataclass(slots=True)
@@ -48,6 +50,8 @@ class SourceRef:
     external_url: str | None = None
     score: float = 0.0
     score_kind: str = ""
+    position: int | None = None
+    """Позиция во внешней выдаче — только диагностика, в оценку не входит."""
 
 
 @dataclass(slots=True)
@@ -61,6 +65,9 @@ class SearchMatch:
     score_kind: str
     sources: list[SourceRef] = field(default_factory=list)
     external_url: str | None = None
+    semantic_similarity: float = 0.0
+    lexical_score: float = 0.0
+    key: str = ""
 
     @property
     def dedupe_key(self) -> str:
@@ -106,19 +113,33 @@ class SearchOutcome:
     def is_partial(self) -> bool:
         """Есть ли источники, которые не отработали штатно."""
 
-        return any(report.status.is_failure for report in self.sources)
+        return any(
+            report.status.is_failure or report.degraded for report in self.sources
+        )
 
     @property
     def is_empty(self) -> bool:
-        """Не найдено ли ни одного совпадения."""
+        """Уверены ли мы, что совпадений нет нигде.
 
-        return not self.matches
+        Если источник был недоступен, пустой список его совпадений не означает
+        отсутствия результатов: выдавать такую деградацию за пустую выдачу
+        значило бы сообщать пользователю неправду. Отвергнутый запрос — это
+        ответ источника, поэтому он пустой выдачи не отменяет.
+        """
+
+        return not self.matches and not any(
+            report.status is SourceStatus.UNAVAILABLE for report in self.sources
+        )
 
     @property
     def failed_sources(self) -> list[str]:
         """Имена источников с проблемами."""
 
-        return [report.source for report in self.sources if report.status.is_failure]
+        return [
+            report.source
+            for report in self.sources
+            if report.status.is_failure or report.degraded
+        ]
 
     def status_of(self, source: str) -> SourceStatus | None:
         """Статус источника по имени, если он опрашивался."""

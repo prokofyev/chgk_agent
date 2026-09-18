@@ -1,5 +1,6 @@
 """Тесты наблюдаемости поиска: метрики, структурные логи, сквозной идентификатор."""
 
+import asyncio
 import json
 
 import pytest
@@ -185,8 +186,35 @@ def test_search_logs_do_not_contain_secrets(capsys: pytest.CaptureFixture[str]) 
     assert secret not in output
 
 
-def test_local_failure_records_unavailable_with_kind() -> None:
-    outcome = LocalSearchOutcome(degraded=True, semantic_used=False, error="база недоступна")
+def test_degraded_lexical_branch_is_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Поиск без лексического сигнала учитывается отдельным счётчиком."""
+
+    outcome = LocalSearchOutcome(
+        degraded=True,
+        semantic_used=True,
+        lexical_used=False,
+        error="индекс недоступен",
+    )
+
+    async def fake_search(self, query, *, limit=20, min_score=0.0):
+        return outcome
+
+    monkeypatch.setattr(
+        "chgk_agent.search.local.LocalSearch.search_with_diagnostics",
+        fake_search,
+    )
+    metrics = Metrics(CollectorRegistry())
+
+    asyncio.run(
+        nodes.local_search(
+            {"query": "описание", "limit": 5},
+            _deps(metrics),
+        )
+    )
+
+    assert _value(metrics.search.lexical_degraded, reason="unavailable") == 1
 
     report = nodes.merge_and_dedupe(
         {"local": outcome, "local_seconds": 0.5}

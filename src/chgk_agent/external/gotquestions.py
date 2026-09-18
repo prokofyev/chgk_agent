@@ -36,7 +36,6 @@ logger = get_logger(__name__)
 SOURCE_NAME = "gotquestions"
 SEARCH_PATH = "/search"
 SEARCH_TYPE = "questions"
-RANK_DECAY = 0.5
 
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
@@ -174,7 +173,6 @@ class GotQuestionsSource(ExternalQuestionSource):
         matches = list(seen.values())[:limit]
         for position, match in enumerate(matches, start=1):
             match.position = position
-            match.score = _rank_score(position)
 
         result.matches = matches
         if matches:
@@ -374,21 +372,8 @@ def _to_match(item: ParsedExternalMatch) -> ExternalMatch:
         external_id=item.external_id,
         position=item.position,
         score=0.0,
-        score_kind="external_rank",
+        score_kind="",
     )
-
-
-def _rank_score(position: int) -> float:
-    """Нормировать оценку по позиции в выдаче.
-
-    Внешний источник не отдаёт числовую релевантность, поэтому оценка
-    убывает монотонно: первый результат получает 1.0, каждый следующий —
-    вдвое меньше, но всегда больше нуля.
-    """
-
-    if position <= 0:
-        return 0.0
-    return round(RANK_DECAY ** (position - 1), 6)
 
 
 def deduplicate_matches(matches: Iterable[ExternalMatch]) -> list[ExternalMatch]:

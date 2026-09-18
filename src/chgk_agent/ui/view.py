@@ -23,8 +23,9 @@ STATUS_LABELS: dict[str, str] = {
 
 SCORE_KIND_LABELS: dict[str, str] = {
     "semantic": "семантическая близость",
-    "lexical": "текстовое совпадение",
-    "external_rank": "позиция во внешней выдаче",
+    "semantic+lexical": "семантическая близость и точные слова",
+    "lexical": "точные слова описания",
+    "none": "близость не определена",
 }
 
 
@@ -181,8 +182,14 @@ def build_view(payload: dict) -> SearchView:
 
     partial = bool(payload.get("partial"))
     empty = bool(payload.get("empty")) or not matches
+    unavailable = any(
+        item.get("status") == "unavailable" for item in payload.get("sources", [])
+    )
 
-    if empty:
+    if unavailable and not matches:
+        state = SearchState.PARTIAL
+        message = "Часть источников недоступна, поэтому выдача может быть неполной."
+    elif empty:
         state = SearchState.EMPTY
         message = "По вашему описанию ничего не найдено — измените формулировку или порог."
     elif partial:

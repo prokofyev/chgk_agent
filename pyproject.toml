@@ -22,6 +22,7 @@ dependencies = [
     "structlog>=24.4",
     "langchain-gigachat>=0.3",
     "tenacity>=9.0",
+    "snowballstemmer>=3.0",
 ]
 
 [dependency-groups]

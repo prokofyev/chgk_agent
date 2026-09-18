@@ -92,6 +92,18 @@ class SearchMetrics:
             "Запросы, отвергнутые внешним источником без блока результатов",
             registry=registry,
         )
+        self.external_embedding_failed = Counter(
+            "chgk_external_embedding_failed_total",
+            "Обращения, где эмбеддинг карточек внешнего источника не удался",
+            ["reason"],
+            registry=registry,
+        )
+        self.lexical_degraded = Counter(
+            "chgk_lexical_degraded_total",
+            "Поиски, где лексический сигнал не участвовал в оценке",
+            ["reason"],
+            registry=registry,
+        )
 
 
 class IngestionMetrics:

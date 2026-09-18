@@ -231,6 +231,27 @@ async def test_rejected_external_source_reported_as_rejected(client_factory) -> 
     assert response.json()["partial"] is True
 
 
+async def test_search_reports_shared_score_kind_for_both_sources(
+    client_factory,
+) -> None:
+    """`score_kind` описывает состав оценки, а не позицию сайта."""
+
+    async with client_factory(chat=FakeChatProvider()) as client:
+        response = await client.post("/search", json={"query": "Тьюринг"})
+
+    payload = response.json()
+    kinds = {match["score_kind"] for match in payload["matches"]}
+
+    assert kinds
+    assert kinds <= {"semantic", "semantic+lexical", "lexical", "none"}
+    assert all(match["score_kind"] != "external_rank" for match in payload["matches"])
+    assert all(
+        ref["score_kind"] != "external_rank"
+        for match in payload["matches"]
+        for ref in match["sources"]
+    )
+
+
 async def test_search_handles_internal_error_in_unified_envelope(
     client_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:

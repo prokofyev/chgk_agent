@@ -51,6 +51,15 @@ def test_settings_read_nested_environment_variables(monkeypatch: pytest.MonkeyPa
     assert settings.search.top_k == 7
 
 
+def test_lexical_defaults_keep_score_in_unit_range() -> None:
+    """Вес лексики подобран так, чтобы сумма не вырождалась в потолок."""
+
+    settings = Settings(_env_file=None)
+
+    assert settings.search.lexical_weight == pytest.approx(0.15)
+    assert settings.search.lexical_saturation > 0
+
+
 def test_empty_user_agent_from_environment_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

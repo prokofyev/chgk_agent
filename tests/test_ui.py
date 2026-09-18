@@ -18,6 +18,7 @@ from chgk_agent.ui.app import MOUNT_PATH, mount_ui
 from chgk_agent.ui.client import SearchApiClient
 from chgk_agent.ui.view import (
     MIN_QUERY_CHARS,
+    SCORE_KIND_LABELS,
     SearchState,
     build_view,
     error_view,
@@ -216,7 +217,7 @@ def test_build_view_success_with_answer() -> None:
                         "name": "gotquestions",
                         "external_url": "https://gotquestions.online/question/1",
                         "score": 0.5,
-                        "score_kind": "external_rank",
+                        "score_kind": "semantic",
                     },
                 ],
                 "external_url": "https://gotquestions.online/question/1",
@@ -287,6 +288,60 @@ def test_build_view_partial_results() -> None:
     assert view.sources[1].is_problem is True
     assert view.sources[1].status_label == "источник недоступен"
     assert view.message
+
+
+def test_score_labels_describe_unified_value() -> None:
+    """Подписи оценки не выдают позицию сайта за семантическую близость."""
+
+    assert SCORE_KIND_LABELS["semantic"] == "семантическая близость"
+    assert SCORE_KIND_LABELS["semantic+lexical"] == (
+        "семантическая близость и точные слова"
+    )
+    assert SCORE_KIND_LABELS["lexical"] == "точные слова описания"
+    assert "external_rank" not in SCORE_KIND_LABELS
+
+
+def test_deduplicated_match_shows_both_sources_and_one_score() -> None:
+    """Вопрос из двух источников показывается один раз с общей оценкой."""
+
+    view = build_view(
+        {
+            "matches": [
+                {
+                    "question_text": "Один и тот же вопрос",
+                    "answer_text": "Ответ",
+                    "score": 0.83,
+                    "score_kind": "semantic+lexical",
+                    "external_url": "https://gotquestions.online/question/7",
+                    "sources": [
+                        {
+                            "name": "local",
+                            "location": "fixture.html",
+                            "score": 0.83,
+                            "score_kind": "semantic+lexical",
+                        },
+                        {
+                            "name": "gotquestions",
+                            "external_url": "https://gotquestions.online/question/7",
+                            "position": 3,
+                            "score": 0.83,
+                            "score_kind": "semantic+lexical",
+                        },
+                    ],
+                }
+            ],
+            "sources": [],
+            "partial": False,
+            "empty": False,
+        }
+    )
+
+    assert len(view.matches) == 1
+    match = view.matches[0]
+    assert set(match.source_names) == {"local", "gotquestions"}
+    assert match.score == 0.83
+    assert match.score_percent == 83
+    assert match.score_label == "семантическая близость и точные слова"
 
 
 def test_build_view_distinguishes_rejected_from_empty() -> None:

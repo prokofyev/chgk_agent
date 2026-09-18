@@ -86,8 +86,7 @@ async def _evaluate(args: argparse.Namespace):
                 session,
                 provider,
                 use_lexical=not args.no_lexical,
-                semantic_min_score=settings.search.semantic_min_score,
-                lexical_min_score=settings.search.lexical_min_score,
+                lexical_candidate_limit=settings.search.lexical_candidate_limit,
             )
             return await evaluate_search_quality(search, cases, k=args.k)
     finally:

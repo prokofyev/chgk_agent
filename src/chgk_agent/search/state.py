@@ -18,6 +18,9 @@ class SearchState(TypedDict, total=False):
     """Состояние одного поиска."""
 
     query: str
+    query_text: str
+    query_embedding: Any
+    query_embedding_error: str | None
     limit: int
     min_score: float
     generate_answer: bool
@@ -32,7 +35,6 @@ class SearchState(TypedDict, total=False):
 
     matches: Any
     sources: Any
-    thresholds: dict[str, float]
     answer: Any
     outcome: Any
 
