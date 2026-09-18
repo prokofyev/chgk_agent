@@ -185,8 +185,8 @@ async def test_reindex_without_source_file_keeps_search_working(
         ).all()
 
         # Эмулируем смену модели: сбрасываем векторы только у вопросов этого
-        # источника. База разработки может содержать реальные импортированные
-        # вопросы, и трогать их тест не должен.
+        # источника, а переиндексация без флага добирает все устаревшие
+        # векторы, включая оставшиеся от других тестов.
         await session.execute(
             update(Question)
             .where(_belongs_to(location))
@@ -198,7 +198,7 @@ async def test_reindex_without_source_file_keeps_search_working(
     await asyncio.to_thread(source_file.unlink)
 
     async with session_factory() as session:
-        run = await drain_queue(session, _VocabularyEmbedder(), location=location)
+        run = await drain_queue(session, _VocabularyEmbedder())
         await session.commit()
 
         assert run.embedded > 0
@@ -252,7 +252,7 @@ async def test_reindexed_questions_report_current_model_and_dimension(
         await session.commit()
 
     async with session_factory() as session:
-        await drain_queue(session, _VocabularyEmbedder(), location=location)
+        await drain_queue(session, _VocabularyEmbedder())
         await session.commit()
 
         stored = (

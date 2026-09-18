@@ -38,8 +38,6 @@ async def reindex_once(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     limit: int | None = None,
-    location: str | None = None,
-    only_model: str | None = None,
     force: bool = False,
     metrics: Metrics | None = None,
 ) -> ReindexRun:
@@ -51,19 +49,15 @@ async def reindex_once(
         provider,
         batch_size=batch_size,
         limit=limit,
-        location=location,
-        only_model=only_model,
         force=force,
     )
     if force:
+        remaining = outcome.failed
+    else:
         remaining = await repository.count_questions_for_reindex(
             session,
-            model=only_model or provider.model,
-            location=location,
-        )
-    else:
-        remaining = await repository.count_questions_without_embedding(
-            session, location=location
+            model=provider.model,
+            dimension=provider.dimension,
         )
 
     current.ingestion.unembedded.set(remaining)
@@ -141,8 +135,6 @@ class BackgroundReindexer:
     async def run_once(
         self,
         *,
-        location: str | None = None,
-        only_model: str | None = None,
         force: bool = False,
     ) -> ReindexRun:
         """Выполнить один проход с собственной сессией."""
@@ -152,8 +144,6 @@ class BackgroundReindexer:
                 session,
                 self._provider,
                 batch_size=self._batch_size,
-                location=location,
-                only_model=only_model,
                 force=force,
                 metrics=self._metrics,
             )
@@ -180,16 +170,26 @@ async def drain_queue(
     provider: EmbeddingProvider,
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    location: str | None = None,
-    only_model: str | None = None,
     force: bool = False,
     metrics: Metrics | None = None,
 ) -> ReindexRun:
-    """Разобрать очередь полностью, повторяя проходы до отсутствия прогресса.
+    """Привести векторы в порядок за один или несколько проходов.
 
-    При `force=True` пересчитываются все вопросы (полная переиндексация при
-    смене модели), иначе — только вопросы без эмбеддинга.
+    Без `force` проходы повторяются, пока есть прогресс: очередь
+    отсутствующих и устаревших векторов уменьшается, поэтому цикл
+    завершается. При `force=True` выполняется ровно один проход по всем
+    вопросам: выборка не зависит от состояния строк, и повторный проход
+    пересчитывал бы те же вопросы бесконечно.
     """
+
+    if force:
+        return await reindex_once(
+            session,
+            provider,
+            batch_size=batch_size,
+            force=True,
+            metrics=metrics,
+        )
 
     run = ReindexRun()
     while True:
@@ -197,9 +197,6 @@ async def drain_queue(
             session,
             provider,
             batch_size=batch_size,
-            location=location,
-            only_model=only_model,
-            force=force,
             metrics=metrics,
         )
         run.embedded += current.embedded

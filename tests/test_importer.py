@@ -108,12 +108,7 @@ def _question(key: str, question: str, answer: str = "ответ") -> ParsedQues
 async def test_counts_questions_without_embedding(session: AsyncSession) -> None:
     from chgk_agent.db import repository
 
-    assert (
-        await repository.count_questions_without_embedding(
-            session, location="file-1.html"
-        )
-        == 0
-    )
+    assert await repository.count_questions_without_embedding(session) == 0
 
 
 async def test_first_import_adds_questions(session: AsyncSession) -> None:

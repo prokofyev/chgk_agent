@@ -126,6 +126,21 @@ def test_reindex_cli_passes_force_flag(
     assert reindex_cli.build_parser().parse_args([]).force is False
 
 
+def test_reindex_cli_has_no_location_option() -> None:
+    """Выбор источника удалён: команда всегда работает со всей базой."""
+
+    parser = reindex_cli.build_parser()
+
+    options = {
+        option
+        for action in parser._actions
+        for option in action.option_strings
+    }
+    assert "--location" not in options
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--location", "resources/messages.html"])
+
+
 def test_reindex_cli_reports_failures(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -21,12 +21,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="chgk-reindex",
-        description="Векторизовать вопросы, оставшиеся без эмбеддинга.",
-    )
-    parser.add_argument(
-        "--location",
-        default=None,
-        help="Ограничить переиндексацию одним источником",
+        description=(
+            "Векторизовать вопросы без эмбеддинга и вопросы с устаревшими "
+            "векторами."
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -38,8 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help=(
-            "пересчитать векторы, посчитанные другой моделью (нужно после "
-            "смены embedding-модели)"
+            "пересчитать все векторы за один проход, включая посчитанные "
+            "текущей моделью"
         ),
     )
     parser.add_argument(
@@ -64,7 +62,7 @@ async def _run_reindex(args: argparse.Namespace):
     verify_embedding_dimension(provider, settings)
     if args.force:
         logger.info(
-            "принудительная переиндексация",
+            "полная переиндексация",
             model=provider.model,
             dimension=provider.dimension,
         )
@@ -76,7 +74,6 @@ async def _run_reindex(args: argparse.Namespace):
                 session,
                 provider,
                 batch_size=args.batch_size,
-                location=args.location,
                 force=args.force,
             )
             await session.commit()

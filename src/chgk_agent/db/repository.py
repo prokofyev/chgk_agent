@@ -148,74 +148,57 @@ async def delete_orphan_questions(session: AsyncSession) -> int:
     return int(result.rowcount or 0)
 
 
-def _pending_embedding_statement(*, location: str | None = None):
-    """Построить выборку вопросов без эмбеддинга с необязательной областью."""
+def _pending_embedding_statement():
+    """Построить выборку вопросов без эмбеддинга."""
 
-    statement = select(Question).where(Question.embedding.is_(None))
-    if location is not None:
-        statement = statement.where(
-            Question.occurrences.any(
-                QuestionOccurrence.source.has(Source.location == location)
-            )
-        )
-    return statement
+    return select(Question).where(Question.embedding.is_(None))
 
 
-def _reindex_statement(
+def _stale_embedding_statement(
     *,
     model: str | None = None,
-    location: str | None = None,
+    dimension: int | None = None,
 ):
     """Построить выборку вопросов для переиндексации.
 
-    Без `model` возвращаются все вопросы: полный пересчёт нужен при смене
-    модели эмбеддингов, когда векторы формально есть, но устарели.
-    С `model` — только вопросы, посчитанные другой моделью.
+    Без `model` возвращаются все вопросы: это полный пересчёт, нужный,
+    когда векторы формально есть, но их требуется посчитать заново.
+    С `model` и `dimension` — только вопросы без вектора и вопросы с
+    устаревшим вектором. Критерий устаревания обратен условию
+    семантической ветки поиска: там требуется совпадение и модели, и
+    размерности, поэтому вектор с верной моделью и неверной
+    размерностью выпадал бы из поиска, не попадая в переиндексацию.
     """
 
     statement = select(Question)
-    if model is not None:
-        statement = statement.where(
-            (Question.embedding.is_(None)) | (Question.embedding_model != model)
-        )
-    if location is not None:
-        statement = statement.where(
-            Question.occurrences.any(
-                QuestionOccurrence.source.has(Source.location == location)
-            )
-        )
-    return statement
+    if model is None:
+        return statement
+    if dimension is None:
+        raise ValueError("Для выборки устаревших векторов нужна размерность")
 
-
-async def questions_without_embedding(
-    session: AsyncSession,
-    *,
-    limit: int | None = None,
-    location: str | None = None,
-) -> list[Question]:
-    """Вернуть вопросы, для которых ещё не построен эмбеддинг.
-
-    Параметр `location` ограничивает выборку вопросами конкретного источника,
-    что нужно для переиндексации одного файла.
-    """
-
-    statement = _pending_embedding_statement(location=location).order_by(Question.id)
-    if limit is not None:
-        statement = statement.limit(limit)
-    result = await session.execute(statement)
-    return list(result.scalars())
+    return statement.where(
+        Question.embedding.is_(None)
+        | Question.embedding_model.is_distinct_from(model)
+        | Question.embedding_dim.is_distinct_from(dimension)
+    )
 
 
 async def questions_for_reindex(
     session: AsyncSession,
     *,
     model: str | None = None,
+    dimension: int | None = None,
     limit: int | None = None,
-    location: str | None = None,
 ) -> list[Question]:
-    """Вернуть вопросы для переиндексации, включая уже векторизованные."""
+    """Вернуть вопросы для переиндексации, включая уже векторизованные.
 
-    statement = _reindex_statement(model=model, location=location).order_by(Question.id)
+    Без `model` возвращаются все вопросы, с моделью и размерностью — только
+    вопросы без вектора и вопросы с устаревшим вектором.
+    """
+
+    statement = _stale_embedding_statement(model=model, dimension=dimension).order_by(
+        Question.id
+    )
     if limit is not None:
         statement = statement.limit(limit)
     result = await session.execute(statement)
@@ -226,35 +209,25 @@ async def count_questions_for_reindex(
     session: AsyncSession,
     *,
     model: str | None = None,
-    location: str | None = None,
+    dimension: int | None = None,
 ) -> int:
     """Сколько вопросов подлежит переиндексации."""
 
-    statement = select(func.count()).select_from(_reindex_statement(
-        model=model, location=location
-    ).subquery())
+    statement = select(func.count()).select_from(
+        _stale_embedding_statement(model=model, dimension=dimension).subquery()
+    )
     result = await session.execute(statement)
     return int(result.scalar_one())
 
 
 async def count_questions_without_embedding(
     session: AsyncSession,
-    *,
-    location: str | None = None,
 ) -> int:
     """Сколько вопросов ожидают векторизации."""
 
-    statement = (
-        select(func.count())
-        .select_from(Question)
-        .where(Question.embedding.is_(None))
+    statement = select(func.count()).select_from(
+        _pending_embedding_statement().subquery()
     )
-    if location is not None:
-        statement = statement.where(
-            Question.occurrences.any(
-                QuestionOccurrence.source.has(Source.location == location)
-            )
-        )
     result = await session.execute(statement)
     return int(result.scalar_one())
 

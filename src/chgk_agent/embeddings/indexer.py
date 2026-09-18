@@ -49,29 +49,29 @@ async def embed_pending(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     limit: int | None = None,
-    location: str | None = None,
-    only_model: str | None = None,
     force: bool = False,
 ) -> EmbeddingOutcome:
     """Векторизовать вопросы очереди.
 
-    Параметр `location` ограничивает проход одним источником.
-    При `force=True` пересчитываются вопросы, посчитанные не текущей моделью
-    (или вовсе без вектора): это нужно при смене модели. Параметр
-    `only_model` переопределяет целевую модель.
+    Без `force` обрабатываются вопросы без вектора и вопросы с устаревшим
+    вектором: критерий совпадает с условием семантической ветки поиска,
+    поэтому после смены модели эмбеддингов достаточно обычного запуска.
+    При `force=True` пересчитываются все вопросы подряд — это полный
+    пересчёт по явному требованию.
     """
 
     outcome = EmbeddingOutcome()
     if force:
         pending = await repository.questions_for_reindex(
             session,
-            model=only_model or provider.model,
             limit=limit,
-            location=location,
         )
     else:
-        pending = await repository.questions_without_embedding(
-            session, limit=limit, location=location
+        pending = await repository.questions_for_reindex(
+            session,
+            model=provider.model,
+            dimension=provider.dimension,
+            limit=limit,
         )
     if not pending:
         return outcome
