@@ -90,7 +90,13 @@ class SearchSettings(BaseSettings):
     """Параметры поиска."""
 
     top_k: int = Field(default=20, ge=1)
-    min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    min_score: float = Field(default=0.85, ge=0.0, le=1.0)
+    """Порог близости для отбора контекста генерации.
+
+    Косинусная близость GigaChat имеет шумовой пол около 0.75-0.88 в
+    зависимости от длины описания, а настоящие совпадения начинаются с
+    0.89. Порог отсекает шум, не влияя на наличие ответа.
+    """
     min_query_chars: int = Field(default=3, ge=1)
     max_query_chars: int = Field(default=2000, ge=1)
     generate_answer: bool = True

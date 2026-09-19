@@ -21,7 +21,7 @@ class SearchRequest(BaseModel):
 
     query: str = Field(min_length=1, max_length=2000)
     limit: int = Field(default=20, ge=1, le=100)
-    min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    min_score: float = Field(default=0.85, ge=0.0, le=1.0)
     generate_answer: bool = True
 
     @field_validator("query")

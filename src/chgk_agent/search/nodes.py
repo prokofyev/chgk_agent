@@ -51,8 +51,10 @@ from chgk_agent.search.scoring import (
 logger = get_logger(__name__)
 
 GENERATION_SYSTEM_PROMPT = (
-    "Ты помощник редактора «Что? Где? Когда?». Отвечай кратко и опирайся "
-    "только на приведённые вопросы и ответы. Не придумывай факты."
+    "Ты игрок «Что? Где? Когда?». Тебе дают вопрос, и ты отвечаешь на него "
+    "кратко и по существу. Если тебе приводят похожие вопросы, которые ты "
+    "встречал раньше, используй их как подсказку, но отвечай на заданный "
+    "вопрос, а не пересказывай подсказки."
 )
 
 
@@ -382,25 +384,22 @@ def rerank(state: dict) -> dict:
 def has_results(state: dict) -> str:
     """Выбрать ветку после объединения совпадений.
 
-    Если ни один источник не дал совпадений, ранжировать нечего: граф
-    сразу формирует ответ, минуя переранжирование и генерацию.
+    Если ни один источник не дал совпадений, ранжировать нечего, но
+    генерация всё равно должна получить управление: ответ на исходный
+    вопрос формируется и с пустым списком похожих вопросов.
     """
 
-    return "rerank" if state.get("matches") else "skip"
+    return "rerank" if state.get("matches") else "generate"
 
 
 def needs_generation(state: dict) -> str:
     """Выбрать ветку после ранжирования.
 
-    Генерация вызывается только тогда, когда она запрошена и есть хотя бы
-    одно подтверждающее совпадение; иначе граф сразу формирует ответ.
+    Генерация вызывается всегда, когда она запрошена: совпадения нужны
+    только как необязательный контекст, а не как условие ответа.
     """
 
-    if not state.get("generate_answer", True):
-        return "skip"
-    if not state.get("matches"):
-        return "skip"
-    return "generate"
+    return "generate" if state.get("generate_answer", True) else "skip"
 
 
 async def generate(state: dict, deps: SearchDeps) -> dict:
@@ -439,11 +438,11 @@ def format_response(state: dict, deps: SearchDeps | None = None) -> dict:
     matches: list[SearchMatch] = state.get("matches", [])
     external = state.get("external")
     answer: GeneratedAnswer | None = state.get("answer")
-    if answer is None and state.get("generate_answer", True) and not matches:
+    if answer is None and state.get("generate_answer", True):
         answer = GeneratedAnswer(
             text=None,
             available=False,
-            error="нет подтверждающих совпадений",
+            error="генерация ответа недоступна",
         )
     truncated_query = (
         external.query if external is not None and external.truncated else None
@@ -510,14 +509,21 @@ def _record_metrics(
 
 
 def _generation_prompt(query: str, matches: list[SearchMatch]) -> str:
-    """Собрать промпт генерации из описания и найденных вопросов."""
+    """Собрать промпт генерации из вопроса и похожих вопросов.
 
-    lines = [f"Описание вопроса: {query}", "", "Найденные вопросы и ответы:"]
-    for index, match in enumerate(matches, start=1):
-        answer = match.answer_text or "не указан"
-        lines.append(f"{index}. Вопрос: {match.question_text}\n   Ответ: {answer}")
-    lines.append("")
-    lines.append("Сформулируй ответ на описание, опираясь только на эти данные.")
+    Список похожих вопросов необязателен: когда ничего не нашлось, модель
+    отвечает на исходный вопрос без подсказок.
+    """
+
+    lines = [f"Вопрос: {query}", ""]
+    if matches:
+        lines.append("Раньше ты встречал такие похожие вопросы:")
+        for index, match in enumerate(matches, start=1):
+            answer = match.answer_text or "не указан"
+            lines.append(f"{index}. Вопрос: {match.question_text}\n   Ответ: {answer}")
+        lines.append("")
+
+    lines.append("Ответь на вопрос.")
     return "\n".join(lines)
 
 

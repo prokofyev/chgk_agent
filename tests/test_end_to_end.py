@@ -18,7 +18,7 @@ from chgk_agent.external.gotquestions import GotQuestionsSource
 from chgk_agent.ingestion.service import IngestionService
 from chgk_agent.observability.metrics import Metrics
 from chgk_agent.ui.client import SearchApiClient
-from chgk_agent.ui.view import SearchState
+from chgk_agent.ui.view import UNKNOWN_ANSWER
 
 pytestmark = pytest.mark.integration
 
@@ -347,7 +347,7 @@ async def test_end_to_end_long_description_uses_short_external_query(
     assert all(len(query) <= 50 for query in sent)
 
 
-async def test_end_to_end_ui_shows_matches_and_answer(
+async def test_end_to_end_ui_shows_answer(
     session_factory: async_sessionmaker[AsyncSession],
     seeded: Metrics,
 ) -> None:
@@ -365,7 +365,5 @@ async def test_end_to_end_ui_shows_matches_and_answer(
 
     view = await api.search("доза порошка в пороховнице", limit=5)
 
-    assert view.state is SearchState.SUCCESS
-    assert view.has_matches
-    assert view.answer is not None and view.answer.available
-    assert any(match.is_external for match in view.matches)
+    assert view.answer_text
+    assert view.answer_text != UNKNOWN_ANSWER

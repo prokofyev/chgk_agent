@@ -99,7 +99,7 @@ def build_search_graph(deps: SearchDeps) -> SearchGraph:
     builder.add_conditional_edges(
         SCORE_NODE,
         has_results,
-        {"rerank": "rerank", "skip": "format_response"},
+        {"rerank": "rerank", "generate": "generate"},
     )
     builder.add_conditional_edges(
         "rerank",

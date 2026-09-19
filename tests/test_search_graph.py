@@ -516,8 +516,8 @@ def test_lexical_candidates_are_never_derived_from_truncated_semantic_list() -> 
     assert len(texts) > 1
 
 
-def test_has_results_skips_rerank_without_matches() -> None:
-    assert nodes.has_results({"matches": []}) == "skip"
+def test_has_results_generates_without_matches() -> None:
+    assert nodes.has_results({"matches": []}) == "generate"
 
 
 def test_has_results_reranks_with_matches() -> None:
@@ -528,8 +528,8 @@ def test_needs_generation_skips_when_disabled() -> None:
     assert nodes.needs_generation({"generate_answer": False, "matches": [object()]}) == "skip"
 
 
-def test_needs_generation_skips_without_matches() -> None:
-    assert nodes.needs_generation({"generate_answer": True, "matches": []}) == "skip"
+def test_needs_generation_runs_without_matches() -> None:
+    assert nodes.needs_generation({"generate_answer": True, "matches": []}) == "generate"
 
 
 def test_needs_generation_runs_with_matches() -> None:
@@ -565,6 +565,21 @@ async def test_generate_degrades_on_provider_error() -> None:
 
     assert update["answer"].available is False
     assert update["answer"].text is None
+
+
+async def test_generate_without_matches_prompts_without_context() -> None:
+    chat = FakeChatProvider(text="Ответ модели")
+    deps = _deps(chat=chat)
+
+    update = await nodes.generate(
+        {"query": "Столица Австралии", "matches": [], "generate_answer": True}, deps
+    )
+
+    assert update["answer"].available is True
+    assert update["answer"].used_matches == []
+    prompt = chat.calls[0]
+    assert "Столица Австралии" in prompt
+    assert "Раньше ты встречал такие похожие вопросы" not in prompt
 
 
 async def test_graph_runs_both_branches_in_parallel_and_formats(
@@ -665,7 +680,8 @@ async def test_graph_reports_empty_and_rejected(
     assert outcome.is_empty is True
     assert outcome.status_of("gotquestions") is SourceStatus.REJECTED
     assert outcome.status_of("local") is SourceStatus.EMPTY
-    assert outcome.answer is not None and outcome.answer.available is False
+    assert outcome.answer is not None and outcome.answer.available is True
+    assert outcome.answer.used_matches == []
 
 
 async def test_graph_exposes_truncated_external_query(

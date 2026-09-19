@@ -1,4 +1,6 @@
-"""Тесты веб-интерфейса: форма, состояния, результаты и генерация."""
+"""Тесты веб-интерфейса: поле вопроса, кнопка «Ответить» и ответ."""
+
+from collections.abc import Iterator
 
 import httpx
 import pytest
@@ -14,15 +16,21 @@ from chgk_agent.external.base import (
 )
 from chgk_agent.observability.metrics import Metrics
 from chgk_agent.search.local import LocalSearchOutcome, LocalSearchResult
-from chgk_agent.ui.app import MOUNT_PATH, mount_ui
+from chgk_agent.ui.app import (
+    BUTTON_LABEL,
+    MOUNT_PATH,
+    TITLE,
+    answer_for,
+    is_submittable,
+    mount_ui,
+)
 from chgk_agent.ui.client import SearchApiClient
 from chgk_agent.ui.view import (
     MIN_QUERY_CHARS,
-    SCORE_KIND_LABELS,
-    SearchState,
+    UNKNOWN_ANSWER,
+    SearchView,
     build_view,
-    error_view,
-    running_view,
+    unknown_view,
     validate_form,
 )
 
@@ -40,12 +48,20 @@ class FakeEmbeddingProvider:
 class FakeChatProvider:
     """Провайдер генерации-заглушка."""
 
+    def __init__(self, text: str = "Сгенерированный ответ", *, fail: bool = False) -> None:
+        self._text = text
+        self._fail = fail
+        self.calls: list[str] = []
+
     async def complete(self, prompt: str, *, system: str | None = None) -> str:
-        return "Сгенерированный ответ"
+        self.calls.append(prompt)
+        if self._fail:
+            raise RuntimeError("генерация недоступна")
+        return self._text
 
 
 class FakeExternalSource:
-    """Внешний источник для проверки статусов в UI."""
+    """Внешний источник для проверки выдачи."""
 
     name = "gotquestions"
     enabled = True
@@ -103,6 +119,12 @@ def _local_outcome() -> LocalSearchOutcome:
     return outcome
 
 
+def _empty_outcome() -> LocalSearchOutcome:
+    outcome = LocalSearchOutcome()
+    outcome.matches = []
+    return outcome
+
+
 def _build_app(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -153,6 +175,21 @@ def _build_client(
     )
 
 
+@pytest.fixture(scope="module")
+def mounted_client() -> Iterator[httpx.AsyncClient]:
+    """Смонтировать интерфейс с заглушками один раз на модуль.
+
+    NiceGUI монтируется в глобальное приложение и после первого запроса
+    запрещает добавлять middleware, поэтому повторное монтирование в
+    рамках процесса невозможно.
+    """
+
+    patcher = pytest.MonkeyPatch()
+    client = _build_client(patcher)
+    yield client
+    patcher.undo()
+
+
 def test_validate_form_blocks_empty_query() -> None:
     errors = validate_form("   ")
 
@@ -167,316 +204,238 @@ def test_validate_form_blocks_short_query() -> None:
     assert str(MIN_QUERY_CHARS) in errors.query
 
 
-def test_validate_form_blocks_invalid_params() -> None:
-    errors = validate_form("нормальное описание", limit=0, min_score=2.0)
-
-    assert errors.limit is not None
-    assert errors.min_score is not None
-
-
 def test_validate_form_accepts_correct_input() -> None:
-    errors = validate_form("нормальное описание", limit=10, min_score=0.5)
+    errors = validate_form("нормальное описание")
 
     assert errors.has_errors is False
 
 
-def test_running_view_shows_progress_state() -> None:
-    view = running_view()
-
-    assert view.state is SearchState.RUNNING
-    assert view.is_running
-    assert view.message
+def test_is_submittable_matches_validation() -> None:
+    assert is_submittable("галстук") is True
+    assert is_submittable("  ") is False
+    assert is_submittable("ок") is False
 
 
-def test_error_view_carries_request_id() -> None:
-    view = error_view("внутренняя ошибка", request_id="abc123")
+async def test_answer_for_rejects_short_query_without_search() -> None:
+    """Обход блокировки кнопки не приводит к обращению к поиску."""
 
-    assert view.state is SearchState.ERROR
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def search(
+            self, query: str, *, limit: int = 20, min_score: float | None = None
+        ) -> SearchView:
+            self.calls.append(query)
+            return SearchView(answer_text="Ответ модели")
+
+    client = RecordingClient()
+
+    view = await answer_for("ок", client)  # type: ignore[arg-type]
+
+    assert view.answer_text == UNKNOWN_ANSWER
+    assert client.calls == []
+
+
+async def test_answer_for_passes_valid_query_to_search() -> None:
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int, float | None]] = []
+
+        async def search(
+            self, query: str, *, limit: int = 20, min_score: float | None = None
+        ) -> SearchView:
+            self.calls.append((query, limit, min_score))
+            return SearchView(answer_text="Ответ модели")
+
+    client = RecordingClient()
+
+    view = await answer_for("галстук", client, limit=5, min_score=0.85)  # type: ignore[arg-type]
+
+    assert view.answer_text == "Ответ модели"
+    assert client.calls == [("галстук", 5, 0.85)]
+
+
+def test_unknown_view_is_unknown() -> None:
+    view = unknown_view(request_id="abc123")
+
+    assert view.answer_text == UNKNOWN_ANSWER
+    assert view.is_unknown
     assert view.request_id == "abc123"
-    assert view.error
 
 
-def test_build_view_success_with_answer() -> None:
-    payload = {
-        "query": "Тьюринг",
-        "matches": [
-            {
-                "question_text": "Вопрос про Тьюринга",
-                "answer_text": "Ответ",
-                "comment": None,
-                "score": 0.87,
-                "score_kind": "semantic",
-                "sources": [
-                    {
-                        "name": "local",
-                        "location": "f.html",
-                        "score": 0.87,
-                        "score_kind": "semantic",
-                    },
-                    {
-                        "name": "gotquestions",
-                        "external_url": "https://gotquestions.online/question/1",
-                        "score": 0.5,
-                        "score_kind": "semantic",
-                    },
-                ],
-                "external_url": "https://gotquestions.online/question/1",
-            }
-        ],
-        "sources": [
-            {"source": "local", "status": "ok", "matches": 1, "truncated": False},
-            {
-                "source": "gotquestions",
-                "status": "ok",
-                "matches": 1,
-                "truncated": True,
-                "query": "Тьюринг",
+def test_build_view_returns_generated_answer() -> None:
+    view = build_view(
+        {
+            "query": "Тьюринг",
+            "matches": [{"question_text": "Вопрос", "answer_text": "Ответ"}],
+            "sources": [{"source": "local", "status": "ok", "matches": 1}],
+            "answer": {
+                "text": "Ответ модели",
+                "available": True,
+                "used_matches": ["Вопрос"],
             },
-        ],
-        "answer": {
-            "text": "Ответ модели",
-            "available": True,
-            "used_matches": ["Вопрос про Тьюринга"],
-        },
-        "request_id": "req-1",
-        "partial": False,
-        "empty": False,
-    }
-
-    view = build_view(payload)
-
-    assert view.state is SearchState.SUCCESS
-    assert view.has_matches
-    match = view.matches[0]
-    assert match.score_percent == 87
-    assert match.score_label == "семантическая близость"
-    assert set(match.source_names) == {"local", "gotquestions"}
-    assert match.is_external is True
-    assert match.external_url
-    assert view.sources[1].truncated is True
-    assert view.answer is not None and view.answer.available
-    assert view.answer.used_matches
-
-
-def test_build_view_partial_results() -> None:
-    payload = {
-        "matches": [
-            {
-                "question_text": "Локальный",
-                "answer_text": "Ответ",
-                "score": 0.5,
-                "score_kind": "lexical",
-                "sources": [{"name": "local", "score": 0.5, "score_kind": "lexical"}],
-            }
-        ],
-        "sources": [
-            {"source": "local", "status": "ok", "matches": 1},
-            {
-                "source": "gotquestions",
-                "status": "unavailable",
-                "matches": 0,
-                "error": "таймаут",
-            },
-        ],
-        "partial": True,
-        "empty": False,
-    }
-
-    view = build_view(payload)
-
-    assert view.state is SearchState.PARTIAL
-    assert view.sources[1].is_problem is True
-    assert view.sources[1].status_label == "источник недоступен"
-    assert view.message
-
-
-def test_score_labels_describe_unified_value() -> None:
-    """Подписи оценки не выдают позицию сайта за семантическую близость."""
-
-    assert SCORE_KIND_LABELS["semantic"] == "семантическая близость"
-    assert SCORE_KIND_LABELS["semantic+lexical"] == (
-        "семантическая близость и точные слова"
+            "request_id": "req-1",
+        }
     )
-    assert SCORE_KIND_LABELS["lexical"] == "точные слова описания"
-    assert "external_rank" not in SCORE_KIND_LABELS
+
+    assert view.answer_text == "Ответ модели"
+    assert view.is_unknown is False
 
 
-def test_deduplicated_match_shows_both_sources_and_one_score() -> None:
-    """Вопрос из двух источников показывается один раз с общей оценкой."""
+def test_build_view_ignores_matches_without_answer() -> None:
+    """Выдача без сгенерированного ответа не показывается пользователю."""
+
+    view = build_view(
+        {
+            "matches": [{"question_text": "Вопрос", "answer_text": "Ответ"}],
+            "sources": [],
+            "answer": {"text": None, "available": False},
+            "empty": True,
+        }
+    )
+
+    assert view.answer_text == UNKNOWN_ANSWER
+    assert view.is_unknown
+
+
+def test_build_view_without_answer_block_returns_unknown() -> None:
+    view = build_view({"matches": [], "sources": []})
+
+    assert view.is_unknown
+
+
+def test_build_view_ignores_blank_answer_text() -> None:
+    view = build_view({"answer": {"text": "   ", "available": True}})
+
+    assert view.is_unknown
+
+
+def test_view_does_not_expose_matches_or_sources() -> None:
+    """На экране нет ни вопросов, ни оценок, ни источников."""
 
     view = build_view(
         {
             "matches": [
                 {
-                    "question_text": "Один и тот же вопрос",
+                    "question_text": "Похожий вопрос",
                     "answer_text": "Ответ",
-                    "score": 0.83,
-                    "score_kind": "semantic+lexical",
+                    "score": 0.9,
+                    "score_kind": "semantic",
                     "external_url": "https://gotquestions.online/question/7",
-                    "sources": [
-                        {
-                            "name": "local",
-                            "location": "fixture.html",
-                            "score": 0.83,
-                            "score_kind": "semantic+lexical",
-                        },
-                        {
-                            "name": "gotquestions",
-                            "external_url": "https://gotquestions.online/question/7",
-                            "position": 3,
-                            "score": 0.83,
-                            "score_kind": "semantic+lexical",
-                        },
-                    ],
+                    "sources": [{"name": "local", "score": 0.9, "score_kind": "semantic"}],
                 }
             ],
-            "sources": [],
-            "partial": False,
-            "empty": False,
+            "sources": [{"source": "local", "status": "ok", "matches": 1}],
+            "answer": {"text": "Ответ модели", "available": True},
         }
     )
 
-    assert len(view.matches) == 1
-    match = view.matches[0]
-    assert set(match.source_names) == {"local", "gotquestions"}
-    assert match.score == 0.83
-    assert match.score_percent == 83
-    assert match.score_label == "семантическая близость и точные слова"
+    assert not hasattr(view, "matches")
+    assert not hasattr(view, "sources")
+    assert SearchView.__slots__ == ("answer_text", "request_id")
 
 
-def test_build_view_distinguishes_rejected_from_empty() -> None:
-    rejected = build_view(
-        {
-            "matches": [],
-            "sources": [
-                {"source": "gotquestions", "status": "rejected", "matches": 0},
-            ],
-            "partial": True,
-            "empty": True,
-        }
-    )
-    empty = build_view(
-        {
-            "matches": [],
-            "sources": [{"source": "gotquestions", "status": "empty", "matches": 0}],
-            "partial": False,
-            "empty": True,
-        }
-    )
-
-    assert rejected.sources[0].status_label == "запрос отвергнут источником"
-    assert rejected.sources[0].is_problem is True
-    assert empty.sources[0].status_label == "ничего не найдено"
-    assert empty.sources[0].is_problem is False
-    assert rejected.state is SearchState.EMPTY
-
-
-def test_build_view_without_matches_suggests_reformulation() -> None:
-    view = build_view({"matches": [], "sources": [], "partial": False, "empty": True})
-
-    assert view.state is SearchState.EMPTY
-    assert "Измените" in (view.message or "") or "измените" in (view.message or "")
-
-
-def test_build_view_without_confirming_matches_hides_answer() -> None:
-    payload = {
-        "matches": [],
-        "sources": [],
-        "answer": {
-            "text": None,
-            "available": False,
-            "error": "нет подтверждающих совпадений",
-        },
-        "empty": True,
-    }
-
-    view = build_view(payload)
-
-    assert view.answer is not None
-    assert view.answer.available is False
-    assert "нельзя" in (view.answer.message or "")
-
-
-async def test_ui_page_is_mounted(monkeypatch: pytest.MonkeyPatch) -> None:
-    async with _build_client(monkeypatch) as client:
-        redirect = await client.get(MOUNT_PATH)
-        page = await client.get(f"{MOUNT_PATH}/")
+async def test_ui_page_is_mounted(mounted_client: httpx.AsyncClient) -> None:
+    redirect = await mounted_client.get(MOUNT_PATH)
+    page = await mounted_client.get(f"{MOUNT_PATH}/")
 
     assert redirect.status_code == 307
     assert page.status_code == 200
     assert "text/html" in page.headers["content-type"]
 
 
-async def test_ui_client_returns_success_view(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ui_page_contains_only_field_and_button(
+    mounted_client: httpx.AsyncClient,
+) -> None:
+    page = await mounted_client.get(f"{MOUNT_PATH}/")
+
+    html = page.text
+    assert "Описание вопроса" in html
+    assert BUTTON_LABEL in html
+    for removed in (
+        "Число результатов",
+        "Минимальный порог",
+        "Сгенерировать ответ",
+        "Поиск выполняется",
+        "внешний источник",
+    ):
+        assert removed not in html
+
+
+def test_title_and_button_label() -> None:
+    assert TITLE == "ЧГК знаток"
+    assert BUTTON_LABEL == "Ответить"
+
+
+async def test_ui_client_returns_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     _, api = _build_app(monkeypatch, chat=FakeChatProvider())
     view = await api.search("Тьюринг")
 
-    assert view.state is SearchState.SUCCESS
-    assert view.has_matches
-    assert view.answer is not None and view.answer.available
+    assert view.answer_text == "Сгенерированный ответ"
+    assert view.is_unknown is False
 
 
-async def test_ui_client_returns_partial_view(monkeypatch: pytest.MonkeyPatch) -> None:
-    external = FakeExternalSource(
-        ExternalSearchResult(
-            status=ExternalStatus.UNAVAILABLE, query="Тьюринг", error="таймаут"
-        )
-    )
-    _, api = _build_app(monkeypatch, external=external, chat=FakeChatProvider())
-    view = await api.search("Тьюринг")
-
-    assert view.state is SearchState.PARTIAL
-    assert view.has_matches
-    assert view.sources[1].status == "unavailable"
-
-
-async def test_ui_client_shows_truncated_external_query(
+async def test_ui_client_answers_without_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    external = FakeExternalSource(
-        ExternalSearchResult(
-            status=ExternalStatus.OK,
-            query="Ангус Бейтмен",
-            queries=["Ангус Бейтмен"],
-            truncated=True,
-            matches=[
-                ExternalMatch(
-                    title="В",
-                    question_text="Про Бейтмена",
-                    answer_text="Ответ",
-                    position=1,
-                    score=1.0,
-                )
-            ],
-        )
-    )
-    _, api = _build_app(monkeypatch, external=external)
-    view = await api.search(
-        "Английский учёный прошлого века Ангус Бейтмен давал ИМ клички"
-    )
+    """Даже без похожих вопросов пользователь получает ответ."""
 
-    assert view.truncated_query == "Ангус Бейтмен"
-    assert view.sources[1].truncated is True
-    assert view.sources[1].query == "Ангус Бейтмен"
+    chat = FakeChatProvider(text="Ответ без контекста")
+    _, api = _build_app(monkeypatch, local=_empty_outcome(), chat=chat)
+    view = await api.search("Столица Австралии")
+
+    assert view.answer_text == "Ответ без контекста"
+    assert chat.calls and "Столица Австралии" in chat.calls[0]
 
 
-async def test_ui_client_degrades_when_local_search_fails(
+async def test_ui_client_returns_unknown_when_chat_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, api = _build_app(monkeypatch, local_failure=True)
+    _, api = _build_app(monkeypatch, chat=FakeChatProvider(fail=True))
     view = await api.search("Тьюринг")
 
-    assert view.state is SearchState.PARTIAL
-    local = view.sources[0]
-    assert local.status == "unavailable"
-    assert local.is_problem is True
+    assert view.answer_text == UNKNOWN_ANSWER
 
 
-async def test_ui_client_handles_validation_error(
+async def test_ui_client_returns_unknown_without_chat_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, api = _build_app(monkeypatch, chat=None)
+    view = await api.search("Тьюринг")
+
+    assert view.answer_text == UNKNOWN_ANSWER
+
+
+async def test_ui_client_returns_unknown_on_validation_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, api = _build_app(monkeypatch)
     view = await api.search("   ")
 
-    assert view.state is SearchState.ERROR
+    assert view.answer_text == UNKNOWN_ANSWER
+
+
+async def test_ui_client_degrades_when_local_search_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Сбой локального поиска не лишает пользователя ответа."""
+
+    _, api = _build_app(
+        monkeypatch, local_failure=True, chat=FakeChatProvider(text="Ответ есть")
+    )
+    view = await api.search("Тьюринг")
+
+    assert view.answer_text == "Ответ есть"
+
+
+async def test_ui_client_keeps_unknown_request_id_off_screen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Идентификатор запроса хранится, но на странице не показывается."""
+
+    _, api = _build_app(monkeypatch, chat=FakeChatProvider(fail=True))
+    view = await api.search("Тьюринг")
+
+    assert view.answer_text == UNKNOWN_ANSWER
     assert view.request_id

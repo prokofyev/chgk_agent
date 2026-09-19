@@ -7,7 +7,10 @@ UI ходит в API через `ASGITransport`: без сети и порта, 
 
 import httpx
 
-from chgk_agent.ui.view import SearchView, build_view, error_view
+from chgk_agent.logging_setup import get_logger
+from chgk_agent.ui.view import SearchView, build_view, unknown_view
+
+logger = get_logger(__name__)
 
 
 class SearchApiError(RuntimeError):
@@ -29,7 +32,7 @@ class SearchApiClient:
         query: str,
         *,
         limit: int = 20,
-        min_score: float = 0.0,
+        min_score: float | None = None,
         generate_answer: bool = True,
     ) -> SearchView:
         """Выполнить поиск и вернуть модель экрана."""
@@ -37,16 +40,18 @@ class SearchApiClient:
         payload = {
             "query": query,
             "limit": limit,
-            "min_score": min_score,
             "generate_answer": generate_answer,
         }
+        if min_score is not None:
+            payload["min_score"] = min_score
         try:
             async with httpx.AsyncClient(
                 transport=self._transport, base_url="http://ui"
             ) as client:
                 response = await client.post("/search", json=payload)
         except httpx.HTTPError as error:  # pragma: no cover - защита от сети
-            return error_view(f"Сервис поиска недоступен: {error}")
+            logger.warning("сервис поиска недоступен", error=str(error))
+            return unknown_view()
 
         if response.status_code != 200:
             return self._error_view(response)
@@ -56,15 +61,12 @@ class SearchApiClient:
     def _error_view(response: httpx.Response) -> SearchView:
         """Превратить ответ об ошибке в модель экрана."""
 
+        request_id = None
         try:
-            payload = response.json()
+            request_id = response.json().get("request_id")
         except ValueError:  # pragma: no cover - не-JSON ответ
-            return error_view(f"Поиск завершился ошибкой ({response.status_code})")
-
-        message = payload.get("message") or f"Поиск завершился ошибкой ({response.status_code})"
-        if response.status_code == 422:
-            message = "Проверьте параметры запроса: " + message
-        return error_view(message, request_id=payload.get("request_id"))
+            request_id = None
+        return unknown_view(request_id=request_id)
 
 
 __all__ = ["SearchApiClient", "SearchApiError"]
