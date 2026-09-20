@@ -9,11 +9,15 @@
 «Не знаю», без технических подробностей.
 """
 
+from collections.abc import Callable
+
 from fastapi import FastAPI
 
+from chgk_agent.logging_setup import get_logger
 from chgk_agent.ui.client import SearchApiClient
 from chgk_agent.ui.view import (
     SearchView,
+    pending_view,
     unknown_view,
     validate_form,
 )
@@ -27,11 +31,60 @@ DESCRIPTION_PLACEHOLDER = "Опишите вопрос своими словам
 
 DEFAULT_LIMIT = 20
 
+logger = get_logger(__name__)
+
 
 def is_submittable(query: str) -> bool:
     """Достаточно ли описание, чтобы отправлять запрос."""
 
     return not validate_form(query).has_errors
+
+
+def form_enabled(query: str, *, busy: bool) -> tuple[bool, bool]:
+    """Включены ли поле ввода и кнопка.
+
+    Порядок значений — поле, кнопка. Пока идёт запрос, заблокировано и
+    поле: иначе ответ пришёл бы на прежний текст, а в поле уже стоял бы
+    другой вопрос. В покое поле доступно всегда, даже пустое, — иначе в
+    него нельзя было бы ничего ввести; кнопка же требует описания
+    достаточной длины.
+    """
+
+    if busy:
+        return False, False
+    return True, is_submittable(query)
+
+
+async def run_answer(
+    query: str,
+    client: SearchApiClient,
+    *,
+    limit: int = DEFAULT_LIMIT,
+    min_score: float | None = None,
+    set_busy: Callable[[bool], None],
+    show: Callable[[SearchView], None],
+) -> None:
+    """Провести один запрос: статус выполнения, затем ответ.
+
+    Порядок показа задан здесь, а не в разметке: прежний ответ исчезает
+    сразу, статус появляется до ожидания, а разблокировка выполняется в
+    `finally`, чтобы неожиданный сбой не оставил форму заблокированной.
+    """
+
+    if not is_submittable(query):
+        show(unknown_view())
+        return
+
+    set_busy(True)
+    show(pending_view())
+    try:
+        view = await answer_for(query, client, limit=limit, min_score=min_score)
+    except Exception:
+        logger.warning("не удалось получить ответ", exc_info=True)
+        view = unknown_view()
+    finally:
+        set_busy(False)
+    show(view)
 
 
 async def answer_for(
@@ -75,20 +128,39 @@ def register_pages(
         ).classes("w-full")
 
         answer_label = ui.label().classes("text-lg")
+        button = ui.button(BUTTON_LABEL, on_click=lambda: run_search()).props(
+            "color=primary"
+        )
+        busy = False
+
+        def sync_form() -> None:
+            """Привести доступность поля и кнопки к текущему состоянию."""
+
+            query_input.enabled, button.enabled = form_enabled(
+                query_input.value or "", busy=busy
+            )
+
+        def set_busy(value: bool) -> None:
+            """Запомнить, что запрос выполняется, и обновить форму."""
+
+            nonlocal busy
+            busy = value
+            sync_form()
 
         async def run_search() -> None:
             """Проверить описание и показать ответ."""
 
-            view = await answer_for(
+            await run_answer(
                 query_input.value or "",
                 client,
                 limit=limit,
                 min_score=min_score,
+                set_busy=set_busy,
+                show=lambda view: _render_view(view, answer_label),
             )
-            _render_view(view, answer_label)
 
-        button = ui.button(BUTTON_LABEL, on_click=run_search).props("color=primary")
-        button.bind_enabled_from(query_input, "value", backward=is_submittable)
+        query_input.on_value_change(sync_form)
+        sync_form()
 
 
 def _render_view(view: SearchView, answer_label: object) -> None:
@@ -106,9 +178,11 @@ __all__ = [
     "PAGE_PATH",
     "TITLE",
     "answer_for",
+    "form_enabled",
     "is_submittable",
     "mount_ui",
     "register_pages",
+    "run_answer",
 ]
 
 

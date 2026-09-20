@@ -12,6 +12,7 @@ MIN_QUERY_CHARS = 3
 MAX_QUERY_CHARS = 2000
 
 UNKNOWN_ANSWER = "Не знаю"
+PENDING_ANSWER = "Думаю..."
 
 
 @dataclass(slots=True)
@@ -65,6 +66,12 @@ def unknown_view(*, request_id: str | None = None) -> SearchView:
     return SearchView(answer_text=UNKNOWN_ANSWER, request_id=request_id)
 
 
+def pending_view() -> SearchView:
+    """Статус на время выполнения запроса."""
+
+    return SearchView(answer_text=PENDING_ANSWER)
+
+
 def build_view(payload: dict) -> SearchView:
     """Построить модель экрана по ответу API поиска.
 
@@ -87,10 +94,12 @@ def build_view(payload: dict) -> SearchView:
 __all__ = [
     "MAX_QUERY_CHARS",
     "MIN_QUERY_CHARS",
+    "PENDING_ANSWER",
     "UNKNOWN_ANSWER",
     "FormErrors",
     "SearchView",
     "build_view",
+    "pending_view",
     "unknown_view",
     "validate_form",
 ]

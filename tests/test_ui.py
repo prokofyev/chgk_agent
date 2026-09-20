@@ -21,15 +21,19 @@ from chgk_agent.ui.app import (
     MOUNT_PATH,
     TITLE,
     answer_for,
+    form_enabled,
     is_submittable,
     mount_ui,
+    run_answer,
 )
 from chgk_agent.ui.client import SearchApiClient
 from chgk_agent.ui.view import (
     MIN_QUERY_CHARS,
+    PENDING_ANSWER,
     UNKNOWN_ANSWER,
     SearchView,
     build_view,
+    pending_view,
     unknown_view,
     validate_form,
 )
@@ -216,6 +220,129 @@ def test_is_submittable_matches_validation() -> None:
     assert is_submittable("ок") is False
 
 
+def test_form_enabled_blocks_field_and_button_while_busy() -> None:
+    """Во время запроса недоступны и поле, и кнопка."""
+
+    assert form_enabled("галстук", busy=True) == (False, False)
+    assert form_enabled("", busy=True) == (False, False)
+
+
+def test_form_enabled_keeps_field_editable_when_idle() -> None:
+    """В покое поле доступно даже пустым, иначе в него не ввести текст."""
+
+    assert form_enabled("", busy=False) == (True, False)
+    assert form_enabled("галстук", busy=False) == (True, True)
+
+
+class _RecordingClient:
+    """Клиент, фиксирующий состояние формы на момент обращения."""
+
+    def __init__(self, answer: str = "Ответ модели") -> None:
+        self.answer = answer
+        self.calls: list[tuple[str, bool]] = []
+        self.fail = False
+        self.busy = False
+
+    async def search(
+        self, query: str, *, limit: int = 20, min_score: float | None = None
+    ) -> SearchView:
+        self.calls.append((query, self.busy))
+        if self.fail:
+            raise RuntimeError("сбой клиента")
+        return SearchView(answer_text=self.answer)
+
+
+class _Recorder:
+    """Клиент-заглушка, показанные тексты и история блокировок формы."""
+
+    def __init__(self) -> None:
+        self.client = _RecordingClient()
+        self.shown: list[SearchView] = []
+        self.busy_states: list[bool] = []
+
+    def set_busy(self, value: bool) -> None:
+        """Запомнить состояние формы на момент вызова."""
+
+        self.client.busy = value
+        self.busy_states.append(value)
+
+    def show(self, view: SearchView) -> None:
+        """Запомнить показанный пользователю текст."""
+
+        self.shown.append(view)
+
+    @property
+    def texts(self) -> list[str]:
+        """Показанные тексты по порядку."""
+
+        return [view.answer_text for view in self.shown]
+
+
+async def test_run_answer_shows_status_before_answer() -> None:
+    recorder = _Recorder()
+
+    await run_answer(
+        "галстук",
+        recorder.client,  # type: ignore[arg-type]
+        set_busy=recorder.set_busy,
+        show=recorder.show,
+    )
+
+    assert recorder.texts == [PENDING_ANSWER, "Ответ модели"]
+    assert recorder.client.calls == [("галстук", True)]
+
+
+async def test_run_answer_replaces_previous_answer() -> None:
+    """Ответ на предыдущий вопрос исчезает до появления нового."""
+
+    recorder = _Recorder()
+    recorder.show(SearchView(answer_text="Прошлый ответ"))
+
+    await run_answer(
+        "новый вопрос",
+        recorder.client,  # type: ignore[arg-type]
+        set_busy=recorder.set_busy,
+        show=recorder.show,
+    )
+
+    assert "Прошлый ответ" not in recorder.texts[1:]
+    assert recorder.texts[1] == PENDING_ANSWER
+
+
+async def test_run_answer_unblocks_form_after_failure() -> None:
+    """Неожиданный сбой не оставляет форму заблокированной."""
+
+    recorder = _Recorder()
+    recorder.client.fail = True
+
+    await run_answer(
+        "галстук",
+        recorder.client,  # type: ignore[arg-type]
+        set_busy=recorder.set_busy,
+        show=recorder.show,
+    )
+
+    assert recorder.busy_states == [True, False]
+    assert recorder.texts[-1] == UNKNOWN_ANSWER
+
+
+async def test_run_answer_skips_status_for_short_query() -> None:
+    """Короткое описание не показывает статус и не идёт в поиск."""
+
+    recorder = _Recorder()
+
+    await run_answer(
+        "ок",
+        recorder.client,  # type: ignore[arg-type]
+        set_busy=recorder.set_busy,
+        show=recorder.show,
+    )
+
+    assert recorder.texts == [UNKNOWN_ANSWER]
+    assert recorder.busy_states == []
+    assert recorder.client.calls == []
+
+
 async def test_answer_for_rejects_short_query_without_search() -> None:
     """Обход блокировки кнопки не приводит к обращению к поиску."""
 
@@ -262,6 +389,30 @@ def test_unknown_view_is_unknown() -> None:
     assert view.answer_text == UNKNOWN_ANSWER
     assert view.is_unknown
     assert view.request_id == "abc123"
+
+
+def test_pending_view_shows_status() -> None:
+    """Статус выполнения отличим от ответа «Не знаю»."""
+
+    view = pending_view()
+
+    assert view.answer_text == PENDING_ANSWER
+    assert view.answer_text != UNKNOWN_ANSWER
+    assert view.is_unknown is False
+
+
+def test_build_view_never_returns_pending_status() -> None:
+    """Ответ API не может привести к статусу выполнения."""
+
+    view = build_view(
+        {
+            "matches": [],
+            "sources": [],
+            "answer": {"text": None, "available": False},
+        }
+    )
+
+    assert view.answer_text != PENDING_ANSWER
 
 
 def test_build_view_returns_generated_answer() -> None:
