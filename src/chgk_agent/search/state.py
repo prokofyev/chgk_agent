@@ -25,7 +25,6 @@ class SearchState(TypedDict, total=False):
     term_weights_error: str | None
     limit: int
     min_score: float
-    generate_answer: bool
     disable_lexical: bool
     request_id: str
     started_at: float
@@ -37,7 +36,8 @@ class SearchState(TypedDict, total=False):
 
     matches: Any
     sources: Any
-    answer: Any
+    answer_without_context: Any
+    answer_with_context: Any
     outcome: Any
 
 

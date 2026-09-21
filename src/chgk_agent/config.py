@@ -106,7 +106,6 @@ class SearchSettings(BaseSettings):
     """
     min_query_chars: int = Field(default=3, ge=1)
     max_query_chars: int = Field(default=2000, ge=1)
-    generate_answer: bool = True
     use_lexical: bool = True
     semantic_min_score: float = Field(default=0.0, ge=0.0, le=1.0)
     semantic_fetch_limit: int = Field(default=80, ge=1)

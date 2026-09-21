@@ -227,7 +227,6 @@ async def test_end_to_end_import_search_and_generate(
             json={
                 "query": "В них хранилась доза порошка, но остался ли он ещё?",
                 "limit": 5,
-                "generate_answer": True,
             },
         )
 
@@ -236,9 +235,12 @@ async def test_end_to_end_import_search_and_generate(
     assert payload["matches"]
     local = [report for report in payload["sources"] if report["source"] == "local"]
     assert local and local[0]["status"] == "ok"
-    assert payload["answer"]["available"] is True
-    assert payload["answer"]["text"]
-    assert payload["answer"]["used_matches"]
+    assert payload["answer_without_context"]["available"] is True
+    assert payload["answer_without_context"]["text"]
+    assert payload["answer_without_context"]["used_matches"] == []
+    assert payload["answer_with_context"]["available"] is True
+    assert payload["answer_with_context"]["text"]
+    assert payload["answer_with_context"]["used_matches"]
     assert chat.calls
 
 
@@ -256,8 +258,11 @@ async def test_end_to_end_generation_failure_keeps_matches(
     assert response.status_code == 200
     payload = response.json()
     assert payload["matches"]
-    assert payload["answer"]["available"] is False
-    assert payload["answer"]["text"] is None
+    # Оба прогона независимы, поэтому падение модели видно в каждом.
+    assert payload["answer_without_context"]["available"] is False
+    assert payload["answer_without_context"]["text"] is None
+    assert payload["answer_with_context"]["available"] is False
+    assert payload["answer_with_context"]["text"] is None
 
 
 async def test_end_to_end_external_unavailable_returns_local_matches(
@@ -371,5 +376,6 @@ async def test_end_to_end_ui_shows_answer(
 
     view = await api.search("доза порошка в пороховнице", limit=5)
 
-    assert view.answer_text
-    assert view.answer_text != UNKNOWN_ANSWER
+    assert view.answer_without_context
+    assert view.answer_without_context != UNKNOWN_ANSWER
+    assert view.answer_with_context

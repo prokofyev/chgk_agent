@@ -33,15 +33,10 @@ class SearchApiClient:
         *,
         limit: int = 20,
         min_score: float | None = None,
-        generate_answer: bool = True,
     ) -> SearchView:
         """Выполнить поиск и вернуть модель экрана."""
 
-        payload = {
-            "query": query,
-            "limit": limit,
-            "generate_answer": generate_answer,
-        }
+        payload = {"query": query, "limit": limit}
         if min_score is not None:
             payload["min_score"] = min_score
         try:

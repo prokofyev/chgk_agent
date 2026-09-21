@@ -100,12 +100,19 @@ class GeneratedAnswer:
 
 @dataclass(slots=True)
 class SearchOutcome:
-    """Итог поиска по описанию вопроса."""
+    """Итог поиска по описанию вопроса.
+
+    Ответов два: без подгрузки похожих вопросов и с подгрузкой. Отсутствие
+    прогона — это `None`, а неудача прогона — `GeneratedAnswer` с
+    `available=False`: странице нужно различать «второго ответа не было» и
+    «второй ответ не удался».
+    """
 
     query: str
     matches: list[SearchMatch] = field(default_factory=list)
     sources: list[SourceReport] = field(default_factory=list)
-    answer: GeneratedAnswer | None = None
+    answer_without_context: GeneratedAnswer | None = None
+    answer_with_context: GeneratedAnswer | None = None
     request_id: str | None = None
     truncated_query: str | None = None
     degraded: bool = False

@@ -87,7 +87,6 @@ async def parse_request(state: dict) -> dict:
     query = " ".join(str(state.get("query") or "").split())
     limit = max(int(state.get("limit") or 20), 1)
     min_score = float(state.get("min_score") or 0.0)
-    generate = bool(state.get("generate_answer", True))
     request_id = state.get("request_id") or get_request_id() or new_request_id()
 
     return {
@@ -95,7 +94,6 @@ async def parse_request(state: dict) -> dict:
         "started_at": time.perf_counter(),
         "limit": limit,
         "min_score": min_score,
-        "generate_answer": generate,
         "request_id": request_id,
     }
 
@@ -453,55 +451,67 @@ def rerank(state: dict) -> dict:
     return {"matches": matches}
 
 
-def has_results(state: dict) -> str:
-    """Выбрать ветку после объединения совпадений.
+async def generate_without_context(state: dict, deps: SearchDeps) -> dict:
+    """Сгенерировать ответ на исходный вопрос без подгрузки совпадений.
 
-    Если ни один источник не дал совпадений, ранжировать нечего, но
-    генерация всё равно должна получить управление: ответ на исходный
-    вопрос формируется и с пустым списком похожих вопросов.
+    Узел не читает найденные совпадения: ответ без подсказок не зависит от
+    результатов поиска и может выполняться параллельно ему.
     """
 
-    return "rerank" if state.get("matches") else "generate"
+    answer = await _generate(
+        deps,
+        prompt=_generation_prompt(state.get("query", "")),
+        used_matches=[],
+    )
+    return {"answer_without_context": answer}
 
 
-def needs_generation(state: dict) -> str:
-    """Выбрать ветку после ранжирования.
+async def generate_with_context(state: dict, deps: SearchDeps) -> dict:
+    """Сгенерировать ответ по найденным совпадениям.
 
-    Генерация вызывается всегда, когда она запрошена: совпадения нужны
-    только как необязательный контекст, а не как условие ответа.
+    Когда контекста нет, второго прогона не существует: возвращается
+    отсутствие ответа, а не ответ, сгенерированный с пустым списком
+    подсказок.
     """
 
-    return "generate" if state.get("generate_answer", True) else "skip"
+    matches: list[SearchMatch] = state.get("matches", [])
+    if not matches:
+        return {"answer_with_context": None}
+
+    answer = await _generate(
+        deps,
+        prompt=_generation_prompt(state.get("query", ""), matches),
+        used_matches=[match.question_text for match in matches],
+    )
+    return {"answer_with_context": answer}
 
 
-async def generate(state: dict, deps: SearchDeps) -> dict:
-    """Сгенерировать ответ по найденным совпадениям."""
+async def _generate(
+    deps: SearchDeps,
+    *,
+    prompt: str,
+    used_matches: list[str],
+) -> GeneratedAnswer:
+    """Вызвать модель генерации и превратить исход в доменный ответ."""
 
-    matches: list[SearchMatch] = state["matches"]
     provider = deps.chat_provider
     if provider is None:
-        return {
-            "answer": GeneratedAnswer(
-                text=None, available=False, error="провайдер генерации не настроен"
-            )
-        }
+        return GeneratedAnswer(
+            text=None, available=False, error="провайдер генерации не настроен"
+        )
 
-    prompt = _generation_prompt(state.get("query", ""), matches)
     try:
         text = await provider.complete(prompt, system=GENERATION_SYSTEM_PROMPT)
     except Exception as error:
         logger.warning("генерация ответа недоступна", error=str(error))
-        return {
-            "answer": GeneratedAnswer(text=None, available=False, error=str(error))
-        }
+        return GeneratedAnswer(text=None, available=False, error=str(error))
 
-    return {
-        "answer": GeneratedAnswer(
-            text=text.strip() or None,
-            available=bool(text.strip()),
-            used_matches=[match.question_text for match in matches],
-        )
-    }
+    stripped = text.strip()
+    return GeneratedAnswer(
+        text=stripped or None,
+        available=bool(stripped),
+        used_matches=used_matches,
+    )
 
 
 def format_response(state: dict, deps: SearchDeps | None = None) -> dict:
@@ -509,13 +519,10 @@ def format_response(state: dict, deps: SearchDeps | None = None) -> dict:
 
     matches: list[SearchMatch] = state.get("matches", [])
     external = state.get("external")
-    answer: GeneratedAnswer | None = state.get("answer")
-    if answer is None and state.get("generate_answer", True):
-        answer = GeneratedAnswer(
-            text=None,
-            available=False,
-            error="генерация ответа недоступна",
-        )
+    answer_without_context = _answer_or_unavailable(
+        state.get("answer_without_context")
+    )
+    answer_with_context: GeneratedAnswer | None = state.get("answer_with_context")
     truncated_query = (
         external.query if external is not None and external.truncated else None
     )
@@ -524,7 +531,8 @@ def format_response(state: dict, deps: SearchDeps | None = None) -> dict:
         query=state.get("query", ""),
         matches=matches,
         sources=state.get("sources", []),
-        answer=answer,
+        answer_without_context=answer_without_context,
+        answer_with_context=answer_with_context,
         request_id=state.get("request_id"),
         truncated_query=truncated_query,
         degraded=bool(state.get("term_weights_error")),
@@ -584,11 +592,11 @@ def _record_metrics(
         )
 
 
-def _generation_prompt(query: str, matches: list[SearchMatch]) -> str:
+def _generation_prompt(query: str, matches: list[SearchMatch] | None = None) -> str:
     """Собрать промпт генерации из вопроса и похожих вопросов.
 
-    Список похожих вопросов необязателен: когда ничего не нашлось, модель
-    отвечает на исходный вопрос без подсказок.
+    Без совпадений промпт не содержит блока подсказок: модель отвечает на
+    исходный вопрос сама, а по тексту промпта видно, какой прогон перед нами.
     """
 
     lines = [f"Вопрос: {query}", ""]
@@ -603,16 +611,31 @@ def _generation_prompt(query: str, matches: list[SearchMatch]) -> str:
     return "\n".join(lines)
 
 
+def _answer_or_unavailable(answer: GeneratedAnswer | None) -> GeneratedAnswer:
+    """Превратить отсутствие прогона без подгрузки в признак недоступности.
+
+    Ответ без подсказок запрашивается всегда, поэтому его отсутствие в
+    состоянии означает, что узел не отработал, а не что прогон не был нужен.
+    """
+
+    if answer is not None:
+        return answer
+    return GeneratedAnswer(
+        text=None,
+        available=False,
+        error="генерация ответа недоступна",
+    )
+
+
 __all__ = [
     "SearchDeps",
     "ensure_corpus_index",
     "external_search",
     "format_response",
-    "generate",
-    "has_results",
+    "generate_with_context",
+    "generate_without_context",
     "local_search",
     "merge_and_dedupe",
-    "needs_generation",
     "parse_request",
     "rerank",
 ]

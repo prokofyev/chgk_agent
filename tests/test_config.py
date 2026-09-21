@@ -130,3 +130,11 @@ def test_test_dsn_can_be_set_explicitly(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.database.test_dsn == (
         "postgresql+asyncpg://user@other-host:5432/isolated"
     )
+
+
+def test_generation_switch_is_not_a_setting() -> None:
+    """Признака отключения генерации в настройках больше нет."""
+
+    settings = Settings(_env_file=None)
+
+    assert not hasattr(settings.search, "generate_answer")

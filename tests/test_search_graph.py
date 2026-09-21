@@ -246,7 +246,7 @@ async def test_parse_request_defaults() -> None:
 
     assert state["limit"] == 20
     assert state["min_score"] == 0.0
-    assert state["generate_answer"] is True
+    assert "generate_answer" not in state
 
 
 async def test_local_node_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -670,71 +670,90 @@ def test_lexical_candidates_are_never_derived_from_truncated_semantic_list() -> 
     assert len(texts) > 1
 
 
-def test_has_results_generates_without_matches() -> None:
-    assert nodes.has_results({"matches": []}) == "generate"
+def test_generation_is_not_routed_around() -> None:
+    """Ветки, пропускающей генерацию, больше нет."""
+
+    assert not hasattr(nodes, "needs_generation")
+    assert not hasattr(nodes, "has_results")
 
 
-def test_has_results_reranks_with_matches() -> None:
-    assert nodes.has_results({"matches": [object()]}) == "rerank"
+async def test_generate_without_context_ignores_matches() -> None:
+    """Ответ без подсказок не зависит от найденных совпадений."""
+
+    chat = FakeChatProvider(text="Ответ без подсказок")
+    deps = _deps(chat=chat)
+
+    update = await nodes.generate_without_context(
+        {"query": "Столица Австралии"}, deps
+    )
+
+    assert update["answer_without_context"].text == "Ответ без подсказок"
+    assert update["answer_without_context"].used_matches == []
+    prompt = chat.calls[0]
+    assert "Столица Австралии" in prompt
+    assert "Раньше ты встречал такие похожие вопросы" not in prompt
 
 
-def test_needs_generation_skips_when_disabled() -> None:
-    assert nodes.needs_generation({"generate_answer": False, "matches": [object()]}) == "skip"
+async def test_generate_without_context_degrades_on_provider_error() -> None:
+    chat = FakeChatProvider(fail=True)
+    deps = _deps(chat=chat)
+
+    update = await nodes.generate_without_context({"query": "описание"}, deps)
+
+    assert update["answer_without_context"].available is False
+    assert update["answer_without_context"].text is None
 
 
-def test_needs_generation_runs_without_matches() -> None:
-    assert nodes.needs_generation({"generate_answer": True, "matches": []}) == "generate"
+async def test_generate_without_context_degrades_without_provider() -> None:
+    deps = _deps(chat=None)
+
+    update = await nodes.generate_without_context({"query": "описание"}, deps)
+
+    assert update["answer_without_context"].available is False
 
 
-def test_needs_generation_runs_with_matches() -> None:
-    assert nodes.needs_generation({"generate_answer": True, "matches": [object()]}) == "generate"
-
-
-async def test_generate_uses_matches_and_reports_sources() -> None:
+async def test_generate_with_context_uses_matches_and_reports_sources() -> None:
     chat = FakeChatProvider(text="Сгенерированный ответ")
     deps = _deps(chat=chat)
     matches = [
         SearchMatch("Вопрос 1", "Ответ 1", None, 0.9, "semantic", [SourceRef("local")])
     ]
 
-    update = await nodes.generate(
-        {"query": "описание", "matches": matches, "generate_answer": True}, deps
+    update = await nodes.generate_with_context(
+        {"query": "описание", "matches": matches}, deps
     )
 
-    assert update["answer"].text == "Сгенерированный ответ"
-    assert update["answer"].used_matches == ["Вопрос 1"]
+    assert update["answer_with_context"].text == "Сгенерированный ответ"
+    assert update["answer_with_context"].used_matches == ["Вопрос 1"]
     assert "Вопрос 1" in chat.calls[0]
+    assert "Раньше ты встречал такие похожие вопросы" in chat.calls[0]
 
 
-async def test_generate_degrades_on_provider_error() -> None:
+async def test_generate_with_context_degrades_on_provider_error() -> None:
     chat = FakeChatProvider(fail=True)
     deps = _deps(chat=chat)
     matches = [
         SearchMatch("Вопрос 1", "Ответ 1", None, 0.9, "semantic", [SourceRef("local")])
     ]
 
-    update = await nodes.generate(
-        {"query": "описание", "matches": matches, "generate_answer": True}, deps
+    update = await nodes.generate_with_context(
+        {"query": "описание", "matches": matches}, deps
     )
 
-    assert update["answer"].available is False
-    assert update["answer"].text is None
+    assert update["answer_with_context"].available is False
+    assert update["answer_with_context"].text is None
 
 
-async def test_generate_without_matches_prompts_without_context() -> None:
+async def test_generate_with_context_skips_model_without_matches() -> None:
+    """Без совпадений второго прогона нет: модель не вызывается вовсе."""
+
     chat = FakeChatProvider(text="Ответ модели")
     deps = _deps(chat=chat)
 
-    update = await nodes.generate(
-        {"query": "Столица Австралии", "matches": [], "generate_answer": True}, deps
-    )
+    update = await nodes.generate_with_context({"query": "описание", "matches": []}, deps)
 
-    assert update["answer"].available is True
-    assert update["answer"].used_matches == []
-    prompt = chat.calls[0]
-    assert "Столица Австралии" in prompt
-    assert "Раньше ты встречал такие похожие вопросы" not in prompt
-
+    assert update["answer_with_context"] is None
+    assert chat.calls == []
 
 async def test_graph_runs_both_branches_in_parallel_and_formats(
     monkeypatch: pytest.MonkeyPatch,
@@ -775,7 +794,7 @@ async def test_graph_runs_both_branches_in_parallel_and_formats(
     graph = build_search_graph(deps)
 
     wall_start = time.perf_counter()
-    outcome = await graph.run("описание вопроса", limit=5, generate_answer=True)
+    outcome = await graph.run("описание вопроса", limit=5)
     wall = time.perf_counter() - wall_start
 
     assert "local" in entered
@@ -784,9 +803,158 @@ async def test_graph_runs_both_branches_in_parallel_and_formats(
     assert min(finished) > max(started)
     assert wall < 0.2
     assert outcome.matches
-    assert outcome.answer is not None and outcome.answer.text == "Ответ"
+    assert outcome.answer_without_context is not None
+    assert outcome.answer_without_context.text == "Ответ"
+    assert outcome.answer_with_context is not None
+    assert outcome.answer_with_context.text == "Ответ"
     assert {report.source for report in outcome.sources} == {"local", "gotquestions"}
     assert outcome.request_id
+
+
+async def test_generation_without_context_overlaps_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Первый прогон генерации идёт в одном шаге с подготовкой к поиску.
+
+    LangGraph выполняет граф супершагами, поэтому генерация без подсказок
+    перекрывается с подготовкой, а не складывается с ней последовательно.
+    Здесь это видно по пересечению интервалов: оба шага начались до того,
+    как завершился любой из них.
+    """
+
+    delay = 0.2
+    spans: dict[str, list[float]] = {"plain": [], "with_context": [], "index": []}
+
+    class SlowChatProvider:
+        async def complete(self, prompt: str, *, system: str | None = None) -> str:
+            is_plain = "Раньше ты встречал такие похожие вопросы" not in prompt
+            spans["plain" if is_plain else "with_context"].append(time.perf_counter())
+            await asyncio.sleep(delay)
+            spans["plain" if is_plain else "with_context"].append(time.perf_counter())
+            return "Ответ без подсказок"
+
+    async def slow_build(session: object, *, cache: object = None) -> object:
+        spans["index"].append(time.perf_counter())
+        await asyncio.sleep(delay)
+        spans["index"].append(time.perf_counter())
+        return _corpus_index()
+
+    async def fake_search_with_diagnostics(self, query, *, limit=20, min_score=0.0):
+        return _local_outcome()
+
+    monkeypatch.setattr(
+        "chgk_agent.search.local.LocalSearch.search_with_diagnostics",
+        fake_search_with_diagnostics,
+    )
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _StoredCorpus())
+    monkeypatch.setattr(nodes, "build_corpus_index", slow_build)
+
+    deps = _deps(chat=SlowChatProvider())
+    graph = build_search_graph(deps)
+
+    outcome = await graph.run("описание вопроса")
+
+    plain_start, plain_finish = spans["plain"]
+    index_start, index_finish = spans["index"]
+    assert plain_start < index_finish
+    assert index_start < plain_finish
+    assert outcome.answer_without_context is not None
+    assert outcome.answer_without_context.text == "Ответ без подсказок"
+
+
+async def test_graph_formats_once_with_and_without_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Join собирает обе ветки и вызывает сборку ответа ровно один раз."""
+
+    calls: list[str] = []
+    original = nodes.format_response
+
+    def counting_format(state: dict, deps: SearchDeps | None = None) -> dict:
+        calls.append("format")
+        return original(state, deps=deps)
+
+    async def fake_search_with_diagnostics(self, query, *, limit=20, min_score=0.0):
+        return _local_outcome()
+
+    monkeypatch.setattr(
+        "chgk_agent.search.local.LocalSearch.search_with_diagnostics",
+        fake_search_with_diagnostics,
+    )
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _ReadyCorpus(_corpus_index()))
+    monkeypatch.setattr("chgk_agent.search.graph.format_response", counting_format)
+    deps = _deps(chat=FakeChatProvider(text="Ответ"))
+    graph = build_search_graph(deps)
+
+    outcome = await graph.run("описание")
+
+    assert calls == ["format"]
+    assert outcome.answer_without_context is not None
+    assert outcome.answer_with_context is not None
+
+
+async def test_graph_skips_context_run_on_empty_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Без совпадений выше порога второго прогона нет."""
+
+    async def empty_local(self, query, *, limit=20, min_score=0.0):
+        return LocalSearchOutcome()
+
+    monkeypatch.setattr(
+        "chgk_agent.search.local.LocalSearch.search_with_diagnostics", empty_local
+    )
+    chat = FakeChatProvider(text="Ответ без подсказок")
+    deps = _deps(
+        external=FakeExternalSource(
+            ExternalSearchResult(status=ExternalStatus.EMPTY, query="описание")
+        ),
+        chat=chat,
+    )
+    graph = build_search_graph(deps)
+
+    outcome = await graph.run("описание")
+
+    assert outcome.answer_without_context is not None
+    assert outcome.answer_without_context.text == "Ответ без подсказок"
+    assert outcome.answer_with_context is None
+    # Модель вызвана один раз: только прогон без подсказок.
+    assert len(chat.calls) == 1
+
+
+async def test_graph_reports_failed_run_without_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Отказ генерации виден в ответе и не делает поиск частичным."""
+
+    class FlakyChatProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, prompt: str, *, system: str | None = None) -> str:
+            self.calls += 1
+            if "Раньше ты встречал такие похожие вопросы" in prompt:
+                raise RuntimeError("GigaChat недоступен")
+            return "Ответ без подсказок"
+
+    async def fake_search_with_diagnostics(self, query, *, limit=20, min_score=0.0):
+        return _local_outcome()
+
+    monkeypatch.setattr(
+        "chgk_agent.search.local.LocalSearch.search_with_diagnostics",
+        fake_search_with_diagnostics,
+    )
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _ReadyCorpus(_corpus_index()))
+    deps = _deps(chat=FlakyChatProvider())
+    graph = build_search_graph(deps)
+
+    outcome = await graph.run("описание")
+
+    assert outcome.answer_without_context is not None
+    assert outcome.answer_without_context.available is True
+    assert outcome.answer_with_context is not None
+    assert outcome.answer_with_context.available is False
+    assert outcome.is_partial is False
 
 
 async def test_graph_prepares_index_and_embedding_before_branches(
@@ -835,7 +1003,7 @@ async def test_graph_prepares_index_and_embedding_before_branches(
     )
     graph = build_search_graph(deps)
 
-    await graph.run("описание вопроса", generate_answer=False)
+    await graph.run("описание вопроса")
 
     branch_start = min(order.index("local"), order.index("external"))
     assert order.index("embed") < branch_start
@@ -885,7 +1053,7 @@ async def test_index_preparation_does_not_serialize_behind_embedding(
     graph = build_search_graph(deps)
 
     started = time.perf_counter()
-    await graph.run("описание вопроса", generate_answer=False)
+    await graph.run("описание вопроса")
     wall = time.perf_counter() - started
 
     # Последовательное выполнение заняло бы не меньше 0.30 с.
@@ -913,7 +1081,7 @@ async def test_index_failure_does_not_cancel_external_search(
     deps = _deps(external=source)
     graph = build_search_graph(deps)
 
-    outcome = await graph.run("описание", generate_answer=False)
+    outcome = await graph.run("описание")
 
     assert source.calls == ["описание"]
     assert outcome.status_of("gotquestions") is SourceStatus.OK
@@ -938,7 +1106,7 @@ async def test_graph_passes_term_weights_when_index_is_ready(
     deps = _deps(external=source)
     graph = build_search_graph(deps)
 
-    outcome = await graph.run("жираф и шляпа", generate_answer=False)
+    outcome = await graph.run("жираф и шляпа")
 
     weights = source.term_weights[0]
     assert weights is not None
@@ -967,7 +1135,7 @@ async def test_graph_passes_no_weights_when_index_is_unavailable(
     deps = _deps(external=source)
     graph = build_search_graph(deps)
 
-    outcome = await graph.run("описание", generate_answer=False)
+    outcome = await graph.run("описание")
 
     assert source.term_weights == [None]
     assert outcome.is_partial is True
@@ -995,13 +1163,15 @@ async def test_graph_marks_partial_when_external_fails(
     )
     graph = build_search_graph(deps)
 
-    outcome = await graph.run("описание", generate_answer=False)
+    outcome = await graph.run("описание")
 
     assert outcome.is_partial is True
     assert outcome.status_of("gotquestions") is SourceStatus.UNAVAILABLE
     assert outcome.status_of("local") is SourceStatus.OK
     assert outcome.matches
-    assert outcome.answer is None
+    # Генерация теперь безусловна: её отсутствие означает недоступность.
+    assert outcome.answer_without_context is not None
+    assert outcome.answer_without_context.available is False
 
 
 async def test_graph_reports_empty_and_rejected(
@@ -1021,13 +1191,16 @@ async def test_graph_reports_empty_and_rejected(
     )
     graph = build_search_graph(deps)
 
-    outcome = await graph.run("описание", generate_answer=True)
+    outcome = await graph.run("описание")
 
     assert outcome.is_empty is True
     assert outcome.status_of("gotquestions") is SourceStatus.REJECTED
     assert outcome.status_of("local") is SourceStatus.EMPTY
-    assert outcome.answer is not None and outcome.answer.available is True
-    assert outcome.answer.used_matches == []
+    assert outcome.answer_without_context is not None
+    assert outcome.answer_without_context.available is True
+    assert outcome.answer_without_context.used_matches == []
+    # Совпадений выше порога нет, поэтому второго прогона не было.
+    assert outcome.answer_with_context is None
 
 
 async def test_graph_exposes_truncated_external_query(
@@ -1053,7 +1226,7 @@ async def test_graph_exposes_truncated_external_query(
     )
     graph = build_search_graph(deps)
 
-    outcome = await graph.run("длинное описание " * 5, generate_answer=False)
+    outcome = await graph.run("длинное описание " * 5)
 
     assert outcome.truncated_query == "Ангус Бейтмен"
     assert outcome.sources[1].truncated is True
@@ -1097,7 +1270,7 @@ async def test_graph_scores_both_sources_on_one_scale(
     )
     graph = build_search_graph(deps)
 
-    outcome = await graph.run("Локальный вопрос", generate_answer=False)
+    outcome = await graph.run("Локальный вопрос")
 
     assert len(outcome.matches) == 2
     assert {match.sources[0].name for match in outcome.matches} == {
@@ -1140,7 +1313,7 @@ async def test_external_position_is_diagnostics_not_score(
     )
     graph = build_search_graph(deps)
 
-    outcome = await graph.run("описание", generate_answer=False)
+    outcome = await graph.run("описание")
 
     by_text = {match.question_text: match for match in outcome.matches}
     assert by_text["Карточка first"].sources[0].position == 1
@@ -1173,7 +1346,7 @@ async def test_graph_exposes_unavailable_source_with_reason(
     )
     graph = build_search_graph(deps)
 
-    outcome = await graph.run("описание", generate_answer=False)
+    outcome = await graph.run("описание")
 
     assert outcome.status_of("gotquestions") is SourceStatus.UNAVAILABLE
     assert outcome.is_partial is True
@@ -1225,7 +1398,7 @@ async def test_graph_embeds_description_once_per_search(
     deps = _deps(external=FakeExternalSource(), embedding_provider=provider)
     graph = build_search_graph(deps)
 
-    await graph.run("  Галстук", generate_answer=False)
+    await graph.run("  Галстук")
 
     # Запрос нормализуется перед эмбеддингом: пробелы схлопнуты, регистр снят.
     assert provider.texts[0] == ["галстук"]
@@ -1308,7 +1481,7 @@ async def test_graph_keeps_local_matches_when_card_embedding_fails(
     )
     graph = build_search_graph(deps)
 
-    outcome = await graph.run("описание", generate_answer=False)
+    outcome = await graph.run("описание")
 
     assert outcome.status_of("gotquestions") is SourceStatus.UNAVAILABLE
     assert outcome.is_partial is True

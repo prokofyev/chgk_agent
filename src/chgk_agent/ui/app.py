@@ -4,9 +4,11 @@
 контракт поиска ровно один, а интерфейс можно тестировать без запуска
 сервера.
 
-Пользователь видит только вопрос и ответ: похожие вопросы служат модели
-контекстом, а не выдачей. Всё, что не удалось получить, показывается как
-«Не знаю», без технических подробностей.
+Пользователь видит два ответа: без подгрузки похожих вопросов и с
+подгрузкой. Так видно, изменился ли ответ благодаря поиску по базам
+вопросов. Похожие вопросы остаются контекстом модели, а не выдачей, а всё,
+что не удалось получить, показывается как «Не знаю», без технических
+подробностей.
 """
 
 from collections.abc import Callable
@@ -16,6 +18,8 @@ from fastapi import FastAPI
 from chgk_agent.logging_setup import get_logger
 from chgk_agent.ui.client import SearchApiClient
 from chgk_agent.ui.view import (
+    WITH_CONTEXT_CAPTION,
+    WITHOUT_CONTEXT_CAPTION,
     SearchView,
     pending_view,
     unknown_view,
@@ -127,7 +131,10 @@ def register_pages(
             placeholder=DESCRIPTION_PLACEHOLDER,
         ).classes("w-full")
 
-        answer_label = ui.label().classes("text-lg")
+        ui.label(WITHOUT_CONTEXT_CAPTION).classes("text-sm text-gray-500")
+        answer_without_context_label = ui.label().classes("text-lg")
+        ui.label(WITH_CONTEXT_CAPTION).classes("text-sm text-gray-500")
+        answer_with_context_label = ui.label().classes("text-lg")
         button = ui.button(BUTTON_LABEL, on_click=lambda: run_search()).props(
             "color=primary"
         )
@@ -156,17 +163,30 @@ def register_pages(
                 limit=limit,
                 min_score=min_score,
                 set_busy=set_busy,
-                show=lambda view: _render_view(view, answer_label),
+                show=lambda view: _render_view(
+                    view,
+                    answer_without_context_label,
+                    answer_with_context_label,
+                ),
             )
 
         query_input.on_value_change(sync_form)
         sync_form()
 
 
-def _render_view(view: SearchView, answer_label: object) -> None:
-    """Показать ответ пользователю."""
+def _render_view(
+    view: SearchView,
+    answer_without_context_label: object,
+    answer_with_context_label: object,
+) -> None:
+    """Показать оба ответа пользователю.
 
-    answer_label.text = view.answer_text
+    Пустое место, а не выдуманный текст: когда второго прогона не было,
+    показывать на его месте нечего.
+    """
+
+    answer_without_context_label.text = view.answer_without_context or ""
+    answer_with_context_label.text = view.answer_with_context or ""
 
 
 __all__ = [

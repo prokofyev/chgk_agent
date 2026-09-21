@@ -1,8 +1,10 @@
 """Граф оркестрации поиска на LangGraph.
 
-Схема: `parse_request → fan-out (embed_query | ensure_corpus_index) →
-fan-out (local_search | external_search) → merge_and_dedupe → rerank →
-generate → format_response`. Подготовительные ноды и ветки поиска выполняются
+Схема: `parse_request → (generate_without_context | embed_query |
+ensure_corpus_index) → (local_search | external_search) → merge_and_dedupe →
+score_matches → rerank → generate_with_context → format_response`. Ответ без
+подгрузки похожих вопросов не зависит от поиска, поэтому стартует в одном
+супершаге с подготовкой и не удлиняет ответ набегом. Ветки поиска выполняются
 параллельно и независимо: падение или таймаут одной не отменяет вторую, а
 результат помечается частичным.
 """
@@ -21,11 +23,10 @@ from chgk_agent.search.nodes import (
     ensure_corpus_index,
     external_search,
     format_response,
-    generate,
-    has_results,
+    generate_with_context,
+    generate_without_context,
     local_search,
     merge_and_dedupe,
-    needs_generation,
     parse_request,
     rerank,
     score_external,
@@ -54,7 +55,6 @@ class SearchGraph:
         *,
         limit: int = 20,
         min_score: float = 0.0,
-        generate_answer: bool = True,
         disable_lexical: bool = False,
         request_id: str | None = None,
     ) -> SearchOutcome:
@@ -66,7 +66,6 @@ class SearchGraph:
                     "query": query,
                     "limit": limit,
                     "min_score": min_score,
-                    "generate_answer": generate_answer,
                     "disable_lexical": disable_lexical,
                     "request_id": active_request_id,
                 }
@@ -89,10 +88,12 @@ def build_search_graph(deps: SearchDeps) -> SearchGraph:
     builder.add_node("merge_and_dedupe", merge_and_dedupe)
     builder.add_node(SCORE_NODE, partial(score_matches, deps=deps))
     builder.add_node("rerank", rerank)
-    builder.add_node("generate", partial(generate, deps=deps))
+    builder.add_node("generate_without_context", partial(generate_without_context, deps=deps))
+    builder.add_node("generate_with_context", partial(generate_with_context, deps=deps))
     builder.add_node("format_response", partial(format_response, deps=deps))
 
     builder.add_edge(START, "parse_request")
+    builder.add_edge("parse_request", "generate_without_context")
     builder.add_edge("parse_request", "embed_query")
     builder.add_edge("parse_request", "ensure_corpus_index")
     builder.add_edge("embed_query", LOCAL_NODE)
@@ -102,17 +103,11 @@ def build_search_graph(deps: SearchDeps) -> SearchGraph:
     builder.add_edge(EXTERNAL_NODE, EXTERNAL_SCORE_NODE)
     builder.add_edge([LOCAL_NODE, EXTERNAL_SCORE_NODE], "merge_and_dedupe")
     builder.add_edge("merge_and_dedupe", SCORE_NODE)
-    builder.add_conditional_edges(
-        SCORE_NODE,
-        has_results,
-        {"rerank": "rerank", "generate": "generate"},
+    builder.add_edge(SCORE_NODE, "rerank")
+    builder.add_edge("rerank", "generate_with_context")
+    builder.add_edge(
+        ["generate_without_context", "generate_with_context"], "format_response"
     )
-    builder.add_conditional_edges(
-        "rerank",
-        needs_generation,
-        {"generate": "generate", "skip": "format_response"},
-    )
-    builder.add_edge("generate", "format_response")
     builder.add_edge("format_response", END)
 
     return SearchGraph(deps=deps, graph=builder.compile())

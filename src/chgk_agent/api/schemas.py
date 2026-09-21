@@ -22,7 +22,6 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     limit: int = Field(default=20, ge=1, le=100)
     min_score: float = Field(default=0.85, ge=0.0, le=1.0)
-    generate_answer: bool = True
 
     @field_validator("query")
     @classmethod
@@ -117,7 +116,7 @@ class SourceReportSchema(BaseModel):
 
 
 class AnswerSchema(BaseModel):
-    """Сгенерированный ответ и его доступность."""
+    """Один результат генерации и его доступность."""
 
     text: str | None = None
     available: bool
@@ -137,12 +136,18 @@ class AnswerSchema(BaseModel):
 
 
 class SearchResponse(BaseModel):
-    """Ответ поиска."""
+    """Ответ поиска.
+
+    Генерация даёт два независимых результата: без подгрузки похожих
+    вопросов и с подгрузкой. Поле с единственным ответом не сохраняется,
+    чтобы клиент не мог принять один прогон за другой.
+    """
 
     query: str
     matches: list[MatchSchema]
     sources: list[SourceReportSchema]
-    answer: AnswerSchema | None = None
+    answer_without_context: AnswerSchema | None = None
+    answer_with_context: AnswerSchema | None = None
     request_id: str | None = None
     truncated_query: str | None = None
     partial: bool = False
@@ -156,9 +161,14 @@ class SearchResponse(BaseModel):
             query=outcome.query,
             matches=[MatchSchema.from_domain(match) for match in outcome.matches],
             sources=[SourceReportSchema.from_domain(report) for report in outcome.sources],
-            answer=(
-                AnswerSchema.from_domain(outcome.answer)
-                if outcome.answer is not None
+            answer_without_context=(
+                AnswerSchema.from_domain(outcome.answer_without_context)
+                if outcome.answer_without_context is not None
+                else None
+            ),
+            answer_with_context=(
+                AnswerSchema.from_domain(outcome.answer_with_context)
+                if outcome.answer_with_context is not None
                 else None
             ),
             request_id=outcome.request_id,

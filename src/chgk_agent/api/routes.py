@@ -62,7 +62,6 @@ async def search(payload: SearchRequest, deps: Deps) -> SearchResponse:
         payload.query,
         limit=payload.limit,
         min_score=payload.min_score,
-        generate_answer=payload.generate_answer,
         disable_lexical=not deps.settings.search.use_lexical,
         request_id=get_request_id(),
     )

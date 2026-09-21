@@ -194,6 +194,64 @@ async def test_search_returns_structured_result(client_factory) -> None:
     }
     assert payload["request_id"]
     assert response.headers["X-Request-ID"] == payload["request_id"]
+    # Два независимых результата генерации вместо одного поля.
+    assert "answer" not in payload
+    assert payload["answer_without_context"]["text"]
+    assert payload["answer_with_context"]["text"]
+
+
+async def test_search_returns_two_generation_runs(client_factory) -> None:
+    """Ответ сервиса несёт оба прогона раздельно."""
+
+    class DistinctChatProvider:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def complete(self, prompt: str, *, system: str | None = None) -> str:
+            self.calls.append(prompt)
+            if "Раньше ты встречал такие похожие вопросы" in prompt:
+                return "Ответ с подгрузкой"
+            return "Ответ без подгрузки"
+
+    chat = DistinctChatProvider()
+    async with client_factory(chat=chat) as client:
+        response = await client.post("/search", json={"query": "Тьюринг"})
+
+    payload = response.json()
+    assert payload["answer_without_context"]["text"] == "Ответ без подгрузки"
+    assert payload["answer_with_context"]["text"] == "Ответ с подгрузкой"
+    assert payload["answer_with_context"]["used_matches"]
+
+
+async def test_search_rejects_generation_switch(client_factory) -> None:
+    """Признак отключения генерации больше не принимается."""
+
+    async with client_factory() as client:
+        response = await client.post(
+            "/search", json={"query": "Тьюринг", "generate_answer": False}
+        )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+
+
+async def test_search_keeps_successful_run_when_other_fails(client_factory) -> None:
+    """Отказ одного прогона не отменяет второй."""
+
+    class HalfFailingChatProvider:
+        async def complete(self, prompt: str, *, system: str | None = None) -> str:
+            if "Раньше ты встречал такие похожие вопросы" in prompt:
+                raise RuntimeError("GigaChat недоступен")
+            return "Ответ без подгрузки"
+
+    async with client_factory(chat=HalfFailingChatProvider()) as client:
+        response = await client.post("/search", json={"query": "Тьюринг"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer_without_context"]["available"] is True
+    assert payload["answer_without_context"]["text"] == "Ответ без подгрузки"
+    assert payload["answer_with_context"]["available"] is False
 
 
 async def test_search_rejects_empty_query(client_factory) -> None:
