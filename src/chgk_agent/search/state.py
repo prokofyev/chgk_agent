@@ -21,6 +21,8 @@ class SearchState(TypedDict, total=False):
     query_text: str
     query_embedding: Any
     query_embedding_error: str | None
+    term_weights: dict[str, float] | None
+    term_weights_error: str | None
     limit: int
     min_score: float
     generate_answer: bool

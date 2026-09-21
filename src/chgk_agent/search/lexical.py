@@ -139,6 +139,21 @@ class Bm25Index:
 
         return key in self._documents
 
+    def document_frequency(self, term: str) -> int:
+        """Сколько документов коллекции содержат основу `term`."""
+
+        return self._df.get(term, 0)
+
+    def idf(self, term: str) -> float:
+        """Информативность основы по её документной частоте в коллекции.
+
+        Термин вне корпуса получает максимальное значение: имя собственное,
+        которого нет в базе, — сильный сигнал, и приравнивать его к служебному
+        слову значило бы выбрасывать лучшую часть описания.
+        """
+
+        return _idf(self.size, self.document_frequency(term))
+
     def score(self, query_terms: Sequence[str], key: str) -> float:
         """Оценить документ по терминам запроса."""
 

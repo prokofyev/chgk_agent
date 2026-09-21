@@ -15,6 +15,7 @@ from chgk_agent.external.base import (
 from chgk_agent.external.gotquestions import SOURCE_NAME, GotQuestionsSource
 from chgk_agent.external.ratelimit import CircuitBreaker, RateLimiter
 from chgk_agent.observability.metrics import Metrics
+from chgk_agent.search.lexical import tokenize
 
 FIXTURES = Path(__file__).parent / "fixtures" / "external"
 BASE_URL = "https://gotquestions.online"
@@ -75,6 +76,68 @@ async def test_non_empty_search_returns_matches() -> None:
     assert result.matches[0].score == 0.0
     assert result.query == "Тьюринг"
     assert result.truncated is False
+
+
+@respx.mock
+async def test_search_without_weights_keeps_working() -> None:
+    """Вызов без весов терминов работает по-прежнему."""
+
+    route = respx.get(f"{BASE_URL}/search").mock(
+        return_value=httpx.Response(200, text=_fixture("search_ok.html"))
+    )
+    source = _source()
+
+    result = await source.search("Тьюринг", limit=5)
+
+    assert result.status is ExternalStatus.OK
+    assert result.matches
+    assert route.calls[0].request.url.params.get("search"), "запрос не пуст"
+
+
+@respx.mock
+async def test_search_uses_term_weights_for_short_query() -> None:
+    """Веса терминов влияют на короткий запрос к внешнему источнику."""
+
+    route = respx.get(f"{BASE_URL}/search").mock(
+        return_value=httpx.Response(200, text=_fixture("search_ok.html"))
+    )
+    source = _source()
+    description = "жираф альфа бета гамма дельта хвост повторение продолжение"
+    weights = {
+        tokenize("жираф")[0]: 5.0,
+        tokenize("альфа")[0]: 3.0,
+        tokenize("бета")[0]: 3.0,
+        tokenize("гамма")[0]: 1.0,
+        tokenize("дельта")[0]: 1.0,
+        tokenize("хвост")[0]: 0.1,
+    }
+
+    # Лимит больше одной страницы: иначе источник остановится после первого
+    # запроса, набрав достаточно совпадений, и бюджет запросов не проверить.
+    await source.search(description, limit=100, term_weights=weights)
+
+    queries = [call.request.url.params.get("search", "") for call in route.calls]
+    assert queries == ["жираф", "альфа", "бета"]
+
+
+@respx.mock
+async def test_each_query_contains_single_term() -> None:
+    """Каждый короткий запрос несёт ровно один термин."""
+
+    route = respx.get(f"{BASE_URL}/search").mock(
+        return_value=httpx.Response(200, text=_fixture("search_ok.html"))
+    )
+    source = _source()
+
+    await source.search(
+        "В докладе 1947 года этот человек предложил использовать две комнаты, "
+        "двух не очень сильных игроков в шахматы и оператора. Назовите этого человека.",
+        limit=100,
+    )
+
+    queries = [call.request.url.params.get("search", "") for call in route.calls]
+    assert 1 <= len(queries) <= 3
+    assert all(" " not in query for query in queries)
 
 
 @respx.mock

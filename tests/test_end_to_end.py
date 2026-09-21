@@ -87,7 +87,13 @@ class OfflineExternalSource:
     def __init__(self) -> None:
         self.queries: list[str] = []
 
-    async def search(self, description: str, *, limit: int = 20) -> ExternalSearchResult:
+    async def search(
+        self,
+        description: str,
+        *,
+        limit: int = 20,
+        term_weights: dict[str, float] | None = None,
+    ) -> ExternalSearchResult:
         self.queries.append(description)
         return ExternalSearchResult(
             status=ExternalStatus.UNAVAILABLE,

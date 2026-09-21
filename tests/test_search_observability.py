@@ -240,6 +240,68 @@ def test_external_report_carries_error_kind() -> None:
     assert report.status is SourceStatus.UNAVAILABLE
 
 
+def test_corpus_index_preparation_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Подготовка индекса учитывается отдельным счётчиком по исходу."""
+
+    from chgk_agent.search.lexical import Bm25Index
+
+    index = Bm25Index()
+    index.add("local:1", "шляпа")
+    index.finalize()
+
+    class _ReadyCorpus:
+        is_ready = True
+
+    _ReadyCorpus.index = index  # type: ignore[attr-defined]
+
+    metrics = Metrics(CollectorRegistry())
+    deps = _deps(metrics)
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _ReadyCorpus())
+
+    asyncio.run(nodes.ensure_corpus_index({"query": "шляпа"}, deps))
+
+    assert metrics.search.corpus_index.labels(outcome="ready")._value.get() == 1
+
+
+def test_unavailable_informativeness_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Недоступность информативности учитывается с причиной."""
+
+    class _EmptyCorpus:
+        index = None
+        is_ready = False
+
+    metrics = Metrics(CollectorRegistry())
+    deps = _deps(metrics)
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _EmptyCorpus())
+
+    async def broken_build(session: object, *, cache: object = None) -> object:
+        raise RuntimeError("база недоступна")
+
+    monkeypatch.setattr(nodes, "build_corpus_index", broken_build)
+
+    asyncio.run(nodes.ensure_corpus_index({"query": "шляпа"}, deps))
+
+    assert metrics.search.term_weights_unavailable.labels(reason="unavailable")._value.get() == 1
+    assert metrics.search.corpus_index.labels(outcome="unavailable")._value.get() == 1
+
+
+def test_index_degradation_marks_outcome_partial() -> None:
+    """Потеря информативности помечает ответ частичным."""
+
+    outcome = nodes.format_response(
+        {
+            "query": "описание",
+            "matches": [],
+            "sources": [SourceReport(source="local", status=SourceStatus.OK)],
+            "started_at": 0.0,
+            "term_weights_error": "база недоступна",
+        },
+        deps=_deps(Metrics(CollectorRegistry())),
+    )["outcome"]
+
+    assert outcome.is_partial is True
+
+
 def test_import_operation_id_is_shared_between_report_and_logs(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

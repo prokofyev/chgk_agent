@@ -1,12 +1,16 @@
 """Формирование коротких поисковых запросов для внешнего источника.
 
-Сайт принимает не более 50 символов: более длинный запрос молча
-отклоняется, поэтому длинное описание превращается в один или несколько
-запросов из наиболее информативных терминов.
+Сайт принимает не более 50 символов и считает слова запроса конъюнкцией,
+поэтому длинное описание сжимается в несколько запросов по одному самому
+информативному термину. Информативность приходит извне — как редкость основы в
+локальном корпусе: корпус известен до обращения к сайту и отражает предметную
+область, тогда как статистика внешней выдачи появилась бы только после ответа.
 """
 
 import re
 from dataclasses import dataclass
+
+from chgk_agent.search.lexical import tokenize
 
 WORD_RE = re.compile(r"[\w'’-]+", re.UNICODE)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;:])\s+|\n+")
@@ -253,55 +257,62 @@ def _is_keyword(token: str, *, starts_sentence: bool) -> bool:
     return token[0].isupper() and not starts_sentence
 
 
-def _rank_terms(tokens: list[tuple[str, bool]]) -> list[str]:
-    """Упорядочить уникальные термины по информативности.
+def _meaningful_terms(
+    tokens: list[tuple[str, bool]],
+) -> list[tuple[int, str, str, bool]]:
+    """Отобрать знаменательные термины вместе с порядком и основой.
 
-    Сначала идут имена собственные, числа и аббревиатуры, затем длинные
-    знаменательные слова, затем всё остальное. Стоп-слова и типовые
-    формулировки вопросов ЧГК отбрасываются: они не помогают поиску.
+    Стоп-слова и типовые формулировки отбрасываются до всякого отбора: IDF сам
+    их не уберёт, потому что при коротком описании служебное слово может
+    оказаться редким относительно длины текста. Повторные словоформы
+    схлопываются по основе, чтобы один корень не занимал весь бюджет запроса.
     """
 
-    ranked: list[tuple[int, int, int, str]] = []
+    terms: list[tuple[int, str, str, bool]] = []
     seen: set[str] = set()
     for index, (token, starts_sentence) in enumerate(tokens):
         key = token.casefold()
-        if key in seen or key in STOPWORDS or key in BOILERPLATE or len(token) < 3:
+        if key in STOPWORDS or key in BOILERPLATE or len(token) < 3:
             continue
-        seen.add(key)
-        priority = 2 if _is_keyword(token, starts_sentence=starts_sentence) else 1
-        ranked.append((priority, len(token), -index, token))
-
-    ranked.sort(reverse=True)
-    return [token for _, _, _, token in ranked]
-
-
-def _chunk_terms(tokens: list[str], max_chars: int) -> list[str]:
-    """Уложить термины в запросы длиной не более `max_chars`."""
-
-    queries: list[str] = []
-    current: list[str] = []
-    length = 0
-
-    for token in tokens:
-        if len(token) > max_chars:
+        stem = tokenize(token)[0] if tokenize(token) else key
+        if stem in seen:
             continue
-        extra = len(token) if not current else len(token) + 1
-        if length + extra > max_chars:
-            if current:
-                queries.append(" ".join(current))
-            current = [token]
-            length = len(token)
-        else:
-            current.append(token)
-            length += extra
+        seen.add(stem)
+        terms.append((index, token, stem, starts_sentence))
+    return terms
 
-    if current:
-        queries.append(" ".join(current))
-    return queries
+
+def _rank_terms(
+    terms: list[tuple[int, str, str, bool]],
+    *,
+    term_weights: dict[str, float] | None,
+) -> list[tuple[int, str]]:
+    """Упорядочить термины по информативности, затем по появлению в тексте.
+
+    При доступных весах информативность — редкость основы в локальном корпусе;
+    без них — прежнее правило: имя собственное, число или аббревиатура, затем
+    длина слова. Порядок появления разрешает ничьи: при `df = 0` величина
+    одинакова у всех терминов вне корпуса.
+    """
+
+    def rank(entry: tuple[int, str, str, bool]) -> tuple[float, float, int]:
+        index, token, stem, starts_sentence = entry
+        if term_weights is not None:
+            weight = term_weights.get(stem)
+            return (-(weight if weight is not None else 0.0), 0.0, index)
+        priority = 2.0 if _is_keyword(token, starts_sentence=starts_sentence) else 1.0
+        return (-priority, -float(len(token)), index)
+
+    return [(index, token) for index, token, _, _ in sorted(terms, key=rank)]
 
 
 class ShortQueryBuilder:
-    """Превращает описание в один или несколько коротких запросов."""
+    """Превращает описание в короткие запросы по одному термину.
+
+    Сайт считает слова запроса конъюнкцией, поэтому многотёрмовый запрос сужает
+    выдачу вплоть до пустой. Каждый запрос несёт ровно один самый информативный
+    термин, а число запросов ограничивается бюджетом.
+    """
 
     def __init__(
         self,
@@ -318,7 +329,18 @@ class ShortQueryBuilder:
 
         return self._max_chars
 
-    def build(self, description: str) -> QueryPlan:
+    @property
+    def max_queries(self) -> int:
+        """Сколько коротких запросов разрешено на одно описание."""
+
+        return self._max_queries
+
+    def build(
+        self,
+        description: str,
+        *,
+        term_weights: dict[str, float] | None = None,
+    ) -> QueryPlan:
         """Построить план коротких запросов по описанию."""
 
         text = " ".join(description.split())
@@ -327,8 +349,17 @@ class ShortQueryBuilder:
         if len(text) <= self._max_chars:
             return QueryPlan(queries=[text], truncated=False)
 
-        queries = _chunk_terms(_rank_terms(_terms(text)), self._max_chars)
-        queries = [query for query in queries if query][: self._max_queries]
+        ranked = _rank_terms(
+            _meaningful_terms(_terms(text)),
+            term_weights=term_weights,
+        )
+        queries: list[str] = []
+        for _index, token in ranked:
+            if len(token) > self._max_chars:
+                continue
+            queries.append(token)
+            if len(queries) >= self._max_queries:
+                break
 
         if not queries:
             fallback = " ".join(token for token, _ in _terms(text))[: self._max_chars].strip()
@@ -342,7 +373,13 @@ def build_short_queries(
     *,
     max_chars: int = 50,
     max_queries: int = 3,
+    term_weights: dict[str, float] | None = None,
 ) -> QueryPlan:
     """Собрать короткие запросы для внешнего источника."""
 
-    return ShortQueryBuilder(max_chars=max_chars, max_queries=max_queries).build(description)
+    return ShortQueryBuilder(max_chars=max_chars, max_queries=max_queries).build(
+        description, term_weights=term_weights
+    )
+
+
+__all__ = ["ShortQueryBuilder", "build_short_queries"]

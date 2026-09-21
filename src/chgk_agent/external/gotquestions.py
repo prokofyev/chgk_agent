@@ -64,7 +64,8 @@ class GotQuestionsSource(ExternalQuestionSource):
         )
         self._owns_client = client is None
         self._query_builder = query_builder or ShortQueryBuilder(
-            max_chars=settings.max_query_chars
+            max_chars=settings.max_query_chars,
+            max_queries=settings.max_query_terms,
         )
         self._rate_limiter = rate_limiter or RateLimiter(settings.min_interval_seconds)
         self._circuit_breaker = circuit_breaker or CircuitBreaker(
@@ -106,6 +107,7 @@ class GotQuestionsSource(ExternalQuestionSource):
         description: str,
         *,
         limit: int = 20,
+        term_weights: dict[str, float] | None = None,
     ) -> ExternalSearchResult:
         """Найти вопросы по описанию."""
 
@@ -117,7 +119,7 @@ class GotQuestionsSource(ExternalQuestionSource):
                 error="внешний источник отключён настройкой",
             )
 
-        plan = self._query_builder.build(description)
+        plan = self._query_builder.build(description, term_weights=term_weights)
         if plan.truncated:
             self._metrics.search.external_truncated.inc()
 

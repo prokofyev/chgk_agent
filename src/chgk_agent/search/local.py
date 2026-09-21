@@ -11,17 +11,15 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from chgk_agent.db import repository
 from chgk_agent.db.base import Question, QuestionOccurrence, Source
 from chgk_agent.embeddings.base import EmbeddingProvider
-from chgk_agent.embeddings.text import embedding_document_text, embedding_query_text
+from chgk_agent.embeddings.text import embedding_query_text
 from chgk_agent.logging_setup import get_logger
-from chgk_agent.search.lexical import get_corpus_index, tokenize
+from chgk_agent.search.corpus import LOCAL_KEY_PREFIX, ensure_corpus_index, local_key
+from chgk_agent.search.lexical import tokenize
 from chgk_agent.search.scoring import LEXICAL_KIND, SEMANTIC_KIND
 
 logger = get_logger(__name__)
-
-LOCAL_KEY_PREFIX = "local:"
 
 
 @dataclass(slots=True)
@@ -198,7 +196,7 @@ class LocalSearch:
                     if candidate.id in outcome.semantic_ranks
                     else LEXICAL_KIND
                 ),
-                key=f"{LOCAL_KEY_PREFIX}{candidate.id}",
+                key=local_key(candidate.id),
                 source_location=candidate.source_location,
                 external_url=candidate.external_url,
                 source_key=candidate.source_key,
@@ -241,28 +239,13 @@ class LocalSearch:
         if not terms:
             return []
 
-        index = get_corpus_index()
-        if not index.is_ready:
-            try:
-                documents = await repository.all_question_texts(self._session)
-                index.build(
-                    (
-                        f"{LOCAL_KEY_PREFIX}{question_id}",
-                        embedding_document_text(question_text, answer_text),
-                    )
-                    for question_id, question_text, answer_text in documents
-                )
-            except Exception as error:
-                outcome.lexical_used = False
-                outcome.degraded = True
-                outcome.error = str(error)
-                logger.warning("лексический индекс недоступен", error=str(error))
-                return []
-
-        current = index.index
-        if current is None:
+        try:
+            current = await ensure_corpus_index(self._session)
+        except Exception as error:
             outcome.lexical_used = False
             outcome.degraded = True
+            outcome.error = str(error)
+            logger.warning("лексический индекс недоступен", error=str(error))
             return []
 
         scored = current.scores(terms)

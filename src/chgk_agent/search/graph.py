@@ -1,9 +1,10 @@
 """Граф оркестрации поиска на LangGraph.
 
-Схема: `parse_request → fan-out (local_search | external_search) →
-merge_and_dedupe → rerank → generate → format_response`. Ветки поиска
-выполняются параллельно и независимо: падение или таймаут одной не
-отменяет вторую, а результат помечается частичным.
+Схема: `parse_request → fan-out (embed_query | ensure_corpus_index) →
+fan-out (local_search | external_search) → merge_and_dedupe → rerank →
+generate → format_response`. Подготовительные ноды и ветки поиска выполняются
+параллельно и независимо: падение или таймаут одной не отменяет вторую, а
+результат помечается частичным.
 """
 
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from chgk_agent.search.models import SearchOutcome
 from chgk_agent.search.nodes import (
     SearchDeps,
     embed_query,
+    ensure_corpus_index,
     external_search,
     format_response,
     generate,
@@ -80,6 +82,7 @@ def build_search_graph(deps: SearchDeps) -> SearchGraph:
     builder = StateGraph(SearchState)
     builder.add_node("parse_request", parse_request)
     builder.add_node("embed_query", partial(embed_query, deps=deps))
+    builder.add_node("ensure_corpus_index", partial(ensure_corpus_index, deps=deps))
     builder.add_node(LOCAL_NODE, partial(local_search, deps=deps))
     builder.add_node(EXTERNAL_NODE, partial(external_search, deps=deps))
     builder.add_node(EXTERNAL_SCORE_NODE, partial(score_external, deps=deps))
@@ -91,8 +94,11 @@ def build_search_graph(deps: SearchDeps) -> SearchGraph:
 
     builder.add_edge(START, "parse_request")
     builder.add_edge("parse_request", "embed_query")
+    builder.add_edge("parse_request", "ensure_corpus_index")
     builder.add_edge("embed_query", LOCAL_NODE)
     builder.add_edge("embed_query", EXTERNAL_NODE)
+    builder.add_edge("ensure_corpus_index", LOCAL_NODE)
+    builder.add_edge("ensure_corpus_index", EXTERNAL_NODE)
     builder.add_edge(EXTERNAL_NODE, EXTERNAL_SCORE_NODE)
     builder.add_edge([LOCAL_NODE, EXTERNAL_SCORE_NODE], "merge_and_dedupe")
     builder.add_edge("merge_and_dedupe", SCORE_NODE)

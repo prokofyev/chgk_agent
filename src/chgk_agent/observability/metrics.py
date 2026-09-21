@@ -104,6 +104,18 @@ class SearchMetrics:
             ["reason"],
             registry=registry,
         )
+        self.corpus_index = Counter(
+            "chgk_corpus_index_total",
+            "Подготовка лексического индекса перед ветвлением поиска",
+            ["outcome"],
+            registry=registry,
+        )
+        self.term_weights_unavailable = Counter(
+            "chgk_term_weights_unavailable_total",
+            "Поиски, где информативность терминов оказалась недоступна",
+            ["reason"],
+            registry=registry,
+        )
 
 
 class IngestionMetrics:

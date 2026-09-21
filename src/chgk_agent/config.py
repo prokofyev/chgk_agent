@@ -69,6 +69,13 @@ class ExternalSourceSettings(BaseSettings):
     base_url: str = "https://gotquestions.online"
     user_agent: str = Field(default=DEFAULT_USER_AGENT, min_length=1)
     max_query_chars: int = Field(default=50, ge=1, le=50)
+    max_query_terms: int = Field(default=3, ge=1, le=50)
+    """Сколько коротких запросов уходит во внешний источник.
+
+    Сайт считает слова запроса конъюнкцией, поэтому запрос строится по одному
+    термину, а это число ограничивает бюджет обращений на одно описание.
+    """
+
     page_limit: int = Field(default=20, ge=1)
     max_pages: int = Field(default=1, ge=1)
     min_interval_seconds: float = Field(default=1.0, ge=0)
@@ -121,6 +128,14 @@ class SearchSettings(BaseSettings):
 
     local_timeout_seconds: float = Field(default=10.0, gt=0)
     external_timeout_seconds: float = Field(default=15.0, gt=0)
+    corpus_index_timeout_seconds: float = Field(default=2.0, gt=0)
+    """Сколько ждать подготовку лексического индекса перед ветвлением.
+
+    Сборка идёт параллельно эмбеддингу описания, поэтому таймаут лишь
+    ограничивает деградацию: без индекса внешний запрос строится без учёта
+    редкости, а ответ помечается частичным.
+    """
+
 
 
 class ObservabilitySettings(BaseSettings):

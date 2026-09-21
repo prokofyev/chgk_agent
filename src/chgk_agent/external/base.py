@@ -89,5 +89,11 @@ class ExternalQuestionSource(Protocol):
         description: str,
         *,
         limit: int = 20,
+        term_weights: dict[str, float] | None = None,
     ) -> ExternalSearchResult:
-        """Найти вопросы по описанию."""
+        """Найти вопросы по описанию.
+
+        `term_weights` — информативность основ описания по локальному корпусу.
+        Источник использует её для отбора терминов короткого запроса и MUST
+        работать без неё: `None` означает, что редкость терминов недоступна.
+        """

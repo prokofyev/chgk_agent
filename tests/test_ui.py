@@ -73,7 +73,13 @@ class FakeExternalSource:
     def __init__(self, result: ExternalSearchResult | None = None) -> None:
         self._result = result
 
-    async def search(self, description: str, *, limit: int = 20) -> ExternalSearchResult:
+    async def search(
+        self,
+        description: str,
+        *,
+        limit: int = 20,
+        term_weights: dict[str, float] | None = None,
+    ) -> ExternalSearchResult:
         if self._result is not None:
             return self._result
         return ExternalSearchResult(

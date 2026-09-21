@@ -96,6 +96,7 @@ class FakeExternalSource:
         delay: float = 0.0,
     ) -> None:
         self.calls: list[str] = []
+        self.term_weights: list[dict[str, float] | None] = []
         self.delay = delay
         self._result = result
 
@@ -118,8 +119,15 @@ class FakeExternalSource:
             ],
         )
 
-    async def search(self, description: str, *, limit: int = 20) -> ExternalSearchResult:
+    async def search(
+        self,
+        description: str,
+        *,
+        limit: int = 20,
+        term_weights: dict[str, float] | None = None,
+    ) -> ExternalSearchResult:
         self.calls.append(description)
+        self.term_weights.append(term_weights)
         if self.delay:
             await asyncio.sleep(self.delay)
         if self._result is not None:
@@ -192,6 +200,39 @@ class _SessionFactory:
         return _Session()
 
 
+def _corpus_index() -> object:
+    """Готовый индекс локального корпуса для проверок подготовки."""
+
+    from chgk_agent.search.lexical import Bm25Index
+
+    index = Bm25Index()
+    index.add("local:1", "галстук и шляпа")
+    for number in range(20):
+        index.add(f"local:{number + 2}", "и шляпа")
+    return index.finalize()
+
+
+class _ReadyCorpus:
+    """Кэш с готовым индексом: база не нужна."""
+
+    def __init__(self, index: object) -> None:
+        self.index = index
+        self.is_ready = True
+
+
+class _StoredCorpus:
+    """Кэш без индекса: сборка должна записать его сюда."""
+
+    def __init__(self) -> None:
+        self.index: object | None = None
+        self.is_ready = False
+
+    def build(self, documents: object) -> object:
+        self.index = _corpus_index()
+        self.is_ready = True
+        return self.index
+
+
 async def test_parse_request_normalizes_query() -> None:
     state = await nodes.parse_request({"query": "  тест   Тьюринга ", "limit": 5})
 
@@ -232,6 +273,119 @@ async def test_local_node_handles_failure(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert update["local"].degraded is True
     assert "база недоступна" in update["local"].error
+
+
+async def test_index_node_fills_state_from_ready_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Готовый индекс даёт информативность терминов без обращения к базе."""
+
+    class UnusableSessionFactory:
+        def __call__(self) -> object:
+            raise AssertionError("база не должна опрашиваться при готовом индексе")
+
+    metrics = Metrics(CollectorRegistry())
+    deps = SearchDeps(
+        session_factory=UnusableSessionFactory(),  # type: ignore[arg-type]
+        embedding_provider=FakeEmbeddingProvider(),
+        metrics=metrics,
+    )
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _ReadyCorpus(_corpus_index()))
+
+    update = await nodes.ensure_corpus_index({"query": "жираф и шляпа"}, deps)
+
+    weights = update["term_weights"]
+    assert weights is not None
+    assert weights["жираф"] > weights["шляп"]
+    assert update["term_weights_error"] is None
+    assert metrics.search.corpus_index.labels(outcome="ready")._value.get() == 1
+    assert metrics.search.term_weights_unavailable.labels(reason="unavailable")._value.get() == 0
+
+
+async def test_index_node_builds_index_when_cache_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Пустой кэш заставляет узел построить индекс и посчитать веса."""
+
+    cache = _StoredCorpus()
+    metrics = Metrics(CollectorRegistry())
+    deps = _deps(metrics=metrics)
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: cache)
+
+    async def fake_build(session: object, *, cache: object = None) -> object:
+        return _corpus_index()
+
+    monkeypatch.setattr(nodes, "build_corpus_index", fake_build)
+
+    update = await nodes.ensure_corpus_index({"query": "галстук"}, deps)
+
+    assert update["term_weights"] is not None
+    assert update["term_weights"] is not None and update["term_weights"]["галстук"] > 0
+    assert update["term_weights_error"] is None
+    assert metrics.search.corpus_index.labels(outcome="built")._value.get() == 1
+
+
+async def test_index_node_survives_database_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Недоступная база не роняет узел: поиск пойдёт без учёта редкости."""
+
+    metrics = Metrics(CollectorRegistry())
+    deps = _deps(metrics=metrics)
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _StoredCorpus())
+
+    async def broken_build(session: object, *, cache: object = None) -> object:
+        raise RuntimeError("база недоступна")
+
+    monkeypatch.setattr(nodes, "build_corpus_index", broken_build)
+
+    update = await nodes.ensure_corpus_index({"query": "галстук"}, deps)
+
+    assert update["term_weights"] is None
+    assert "база недоступна" in (update["term_weights_error"] or "")
+    assert metrics.search.corpus_index.labels(outcome="unavailable")._value.get() == 1
+    assert metrics.search.term_weights_unavailable.labels(reason="unavailable")._value.get() == 1
+
+
+async def test_index_node_times_out_with_own_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """У узла собственный бюджет ожидания, отдельный от ветвей поиска."""
+
+    settings = Settings(_env_file=None)
+    settings.search.corpus_index_timeout_seconds = 0.01
+    metrics = Metrics(CollectorRegistry())
+    deps = _deps(settings=settings, metrics=metrics)
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _StoredCorpus())
+
+    async def slow_build(session: object, *, cache: object = None) -> object:
+        await asyncio.sleep(0.5)
+        return _corpus_index()
+
+    monkeypatch.setattr(nodes, "build_corpus_index", slow_build)
+
+    update = await nodes.ensure_corpus_index({"query": "галстук"}, deps)
+
+    assert update["term_weights"] is None
+    assert "таймаут" in (update["term_weights_error"] or "")
+    assert metrics.search.corpus_index.labels(outcome="timeout")._value.get() == 1
+    assert metrics.search.term_weights_unavailable.labels(reason="timeout")._value.get() == 1
+
+
+async def test_index_node_runs_with_lexical_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Отключённая лексика не мешает посчитать информативность терминов."""
+
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _ReadyCorpus(_corpus_index()))
+    deps = _deps()
+
+    update = await nodes.ensure_corpus_index(
+        {"query": "жираф", "disable_lexical": True}, deps
+    )
+
+    assert update["term_weights"] is not None
+    assert update["term_weights_error"] is None
 
 
 async def test_external_node_isolated() -> None:
@@ -602,12 +756,20 @@ async def test_graph_runs_both_branches_in_parallel_and_formats(
     )
 
     class SlowExternal(FakeExternalSource):
-        async def search(self, description: str, *, limit: int = 20):
+        async def search(
+            self,
+            description: str,
+            *,
+            limit: int = 20,
+            term_weights: dict[str, float] | None = None,
+        ):
             started.append(time.perf_counter())
             entered.append("external")
             await asyncio.sleep(0.1)
             finished.append(time.perf_counter())
-            return await super().search(description, limit=limit)
+            return await super().search(
+                description, limit=limit, term_weights=term_weights
+            )
 
     deps = _deps(external=SlowExternal(), chat=FakeChatProvider(text="Ответ"))
     graph = build_search_graph(deps)
@@ -625,6 +787,190 @@ async def test_graph_runs_both_branches_in_parallel_and_formats(
     assert outcome.answer is not None and outcome.answer.text == "Ответ"
     assert {report.source for report in outcome.sources} == {"local", "gotquestions"}
     assert outcome.request_id
+
+
+async def test_graph_prepares_index_and_embedding_before_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Обе подготовительные ноды завершаются до старта ветвей поиска."""
+
+    order: list[str] = []
+
+    async def slow_embed(texts: list[str]) -> list[list[float]]:
+        order.append("embed")
+        await asyncio.sleep(0.05)
+        return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    class SlowEmbeddingProvider:
+        model = "slow-embedding"
+        dimension = 4
+        embed = staticmethod(slow_embed)
+
+    async def slow_build(session: object, *, cache: object = None) -> object:
+        order.append("index")
+        await asyncio.sleep(0.05)
+        return _corpus_index()
+
+    async def fake_search_with_diagnostics(self, query, *, limit=20, min_score=0.0):
+        order.append("local")
+        return _local_outcome()
+
+    monkeypatch.setattr(
+        "chgk_agent.search.local.LocalSearch.search_with_diagnostics",
+        fake_search_with_diagnostics,
+    )
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _StoredCorpus())
+    monkeypatch.setattr(nodes, "build_corpus_index", slow_build)
+
+    class RecordingExternal(FakeExternalSource):
+        async def search(self, description, *, limit=20, term_weights=None):
+            order.append("external")
+            return await super().search(
+                description, limit=limit, term_weights=term_weights
+            )
+
+    deps = _deps(
+        external=RecordingExternal(),
+        embedding_provider=SlowEmbeddingProvider(),
+    )
+    graph = build_search_graph(deps)
+
+    await graph.run("описание вопроса", generate_answer=False)
+
+    branch_start = min(order.index("local"), order.index("external"))
+    assert order.index("embed") < branch_start
+    assert order.index("index") < branch_start
+
+
+async def test_index_preparation_does_not_serialize_behind_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Сборка индекса идёт параллельно эмбеддингу, а не после него."""
+
+    calls = 0
+
+    async def slow_embed(texts: list[str]) -> list[list[float]]:
+        nonlocal calls
+        calls += 1
+        # Замедляется только эмбеддинг описания: эмбеддинг карточек внешнего
+        # источника добавляет собственную задержку и замаскировал бы замер.
+        if calls > 1:
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+        await asyncio.sleep(0.15)
+        return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    class SlowEmbeddingProvider:
+        model = "slow-embedding"
+        dimension = 4
+        embed = staticmethod(slow_embed)
+
+    async def slow_build(session: object, *, cache: object = None) -> object:
+        await asyncio.sleep(0.15)
+        return _corpus_index()
+
+    async def fake_search_with_diagnostics(self, query, *, limit=20, min_score=0.0):
+        return _local_outcome()
+
+    monkeypatch.setattr(
+        "chgk_agent.search.local.LocalSearch.search_with_diagnostics",
+        fake_search_with_diagnostics,
+    )
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _StoredCorpus())
+    monkeypatch.setattr(nodes, "build_corpus_index", slow_build)
+
+    deps = _deps(
+        external=FakeExternalSource(),
+        embedding_provider=SlowEmbeddingProvider(),
+    )
+    graph = build_search_graph(deps)
+
+    started = time.perf_counter()
+    await graph.run("описание вопроса", generate_answer=False)
+    wall = time.perf_counter() - started
+
+    # Последовательное выполнение заняло бы не меньше 0.30 с.
+    assert wall < 0.28
+
+
+async def test_index_failure_does_not_cancel_external_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Отказ индекса не отменяет внешний поиск и помечает ответ частичным."""
+
+    async def fake_search_with_diagnostics(self, query, *, limit=20, min_score=0.0):
+        return _local_outcome()
+
+    async def broken_build(session: object, *, cache: object = None) -> object:
+        raise RuntimeError("база недоступна")
+
+    monkeypatch.setattr(
+        "chgk_agent.search.local.LocalSearch.search_with_diagnostics",
+        fake_search_with_diagnostics,
+    )
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _StoredCorpus())
+    monkeypatch.setattr(nodes, "build_corpus_index", broken_build)
+    source = FakeExternalSource()
+    deps = _deps(external=source)
+    graph = build_search_graph(deps)
+
+    outcome = await graph.run("описание", generate_answer=False)
+
+    assert source.calls == ["описание"]
+    assert outcome.status_of("gotquestions") is SourceStatus.OK
+    assert outcome.is_partial is True
+    assert outcome.matches
+
+
+async def test_graph_passes_term_weights_when_index_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Источник получает веса, когда индекс доступен."""
+
+    async def fake_search_with_diagnostics(self, query, *, limit=20, min_score=0.0):
+        return _local_outcome()
+
+    monkeypatch.setattr(
+        "chgk_agent.search.local.LocalSearch.search_with_diagnostics",
+        fake_search_with_diagnostics,
+    )
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _ReadyCorpus(_corpus_index()))
+    source = FakeExternalSource()
+    deps = _deps(external=source)
+    graph = build_search_graph(deps)
+
+    outcome = await graph.run("жираф и шляпа", generate_answer=False)
+
+    weights = source.term_weights[0]
+    assert weights is not None
+    assert weights["жираф"] > weights["шляп"]
+    assert outcome.is_partial is False
+
+
+async def test_graph_passes_no_weights_when_index_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Без индекса источник получает `None` и строит запрос прежним правилом."""
+
+    async def fake_search_with_diagnostics(self, query, *, limit=20, min_score=0.0):
+        return _local_outcome()
+
+    async def broken_build(session: object, *, cache: object = None) -> object:
+        raise RuntimeError("база недоступна")
+
+    monkeypatch.setattr(
+        "chgk_agent.search.local.LocalSearch.search_with_diagnostics",
+        fake_search_with_diagnostics,
+    )
+    monkeypatch.setattr(nodes, "get_corpus_index", lambda: _StoredCorpus())
+    monkeypatch.setattr(nodes, "build_corpus_index", broken_build)
+    source = FakeExternalSource()
+    deps = _deps(external=source)
+    graph = build_search_graph(deps)
+
+    outcome = await graph.run("описание", generate_answer=False)
+
+    assert source.term_weights == [None]
+    assert outcome.is_partial is True
 
 
 async def test_graph_marks_partial_when_external_fails(

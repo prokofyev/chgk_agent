@@ -108,12 +108,19 @@ class SearchOutcome:
     answer: GeneratedAnswer | None = None
     request_id: str | None = None
     truncated_query: str | None = None
+    degraded: bool = False
+    """Поиск прошёл без части сигнала, не связанного с отдельным источником.
+
+    Например, лексический индекс не удалось подготовить, поэтому внешний
+    запрос строился без учёта редкости терминов. Такой исход честнее показывать
+    частичным: результат получен, но не тем путём, каким задуман.
+    """
 
     @property
     def is_partial(self) -> bool:
-        """Есть ли источники, которые не отработали штатно."""
+        """Есть ли источники, которые не отработали штатно, или потеря сигнала."""
 
-        return any(
+        return self.degraded or any(
             report.status.is_failure or report.degraded for report in self.sources
         )
 

@@ -12,6 +12,7 @@ from chgk_agent.db.base import (
 )
 from chgk_agent.ingestion.importer import QuestionImporter
 from chgk_agent.models.domain import ParsedQuestion, ParseResult
+from chgk_agent.search.lexical import CorpusIndex, tokenize
 from chgk_agent.search.local import (
     SEMANTIC_KIND,
     LocalSearch,
@@ -132,6 +133,30 @@ async def test_lexical_branch_finds_rare_exact_word(
     assert outcome.matches
     assert outcome.matches[0].question_text.startswith("Как называется элементарная частица")
     assert outcome.lexical_ranks == {outcome.matches[0].question_id: 1}
+
+
+async def test_direct_call_builds_index_lazily(
+    session: AsyncSession, clean_search_data: None
+) -> None:
+    """Прямой вызов `LocalSearch` строит индекс сам, без ноды графа."""
+
+    from chgk_agent.search import corpus as corpus_module
+
+    cache = CorpusIndex()
+    original = corpus_module.get_corpus_index
+    corpus_module.get_corpus_index = lambda: cache  # type: ignore[assignment]
+    try:
+        await _seed(session, "Вопрос про кварк и физику?")
+        search = LocalSearch(session, _KeywordEmbedder())
+
+        outcome = await search.search_with_diagnostics("кварк", limit=5)
+    finally:
+        corpus_module.get_corpus_index = original  # type: ignore[assignment]
+
+    assert cache.is_ready is True
+    assert outcome.lexical_ranks
+    assert cache.index is not None
+    assert cache.index.scores(tokenize("кварк"))
 
 
 async def test_lexical_branch_can_be_disabled(

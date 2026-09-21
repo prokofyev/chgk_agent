@@ -23,6 +23,10 @@ from chgk_agent.external.base import (
 )
 from chgk_agent.logging_setup import get_logger, get_request_id, new_request_id
 from chgk_agent.observability.metrics import Metrics, get_metrics
+from chgk_agent.search.corpus import (
+    ensure_corpus_index as build_corpus_index,
+)
+from chgk_agent.search.corpus import term_informativeness
 from chgk_agent.search.lexical import get_corpus_index
 from chgk_agent.search.local import LocalSearch, LocalSearchOutcome
 from chgk_agent.search.merge import (
@@ -120,6 +124,71 @@ async def embed_query(state: dict, deps: SearchDeps) -> dict:
     }
 
 
+async def ensure_corpus_index(state: dict, deps: SearchDeps) -> dict:
+    """Подготовить лексический индекс корпуса до ветвления поиска.
+
+    Индекс нужен обеим веткам: локальной — как источник кандидатов, внешней —
+    как источник редкости терминов описания. Узел стоит параллельно вычислению
+    эмбеддинга, поэтому его время скрыто за обращением к провайдеру, а не
+    добавляется к задержке поиска.
+
+    Отказ подготовки не отменяет поиск: состояние получает причину, метрики —
+    счётчик, а внешний запрос строится без учёта редкости терминов.
+    """
+
+    timeout = deps.settings.search.corpus_index_timeout_seconds
+    metrics = deps.current_metrics.search
+    corpus = get_corpus_index()
+    if corpus.is_ready:
+        metrics.corpus_index.labels(outcome="ready").inc()
+        return {
+            "term_weights": term_informativeness(
+                corpus.index, state.get("query", "")
+            ),
+            "term_weights_error": None,
+        }
+
+    try:
+        async with asyncio.timeout(timeout):
+            async with deps.session_factory() as session:
+                index = await build_corpus_index(session, cache=corpus)
+    except TimeoutError:
+        return _fail_term_weights(
+            deps,
+            outcome="timeout",
+            reason="timeout",
+            error="таймаут подготовки лексического индекса",
+        )
+    except Exception as error:  # недоступная база, схема, ошибка сборки
+        logger.warning("лексический индекс недоступен", error=str(error))
+        return _fail_term_weights(
+            deps,
+            outcome="unavailable",
+            reason="unavailable",
+            error=str(error),
+        )
+
+    metrics.corpus_index.labels(outcome="built").inc()
+    return {
+        "term_weights": term_informativeness(index, state.get("query", "")),
+        "term_weights_error": None,
+    }
+
+
+def _fail_term_weights(
+    deps: SearchDeps,
+    *,
+    outcome: str,
+    reason: str,
+    error: str,
+) -> dict:
+    """Отметить недоступность информативности терминов без срыва поиска."""
+
+    deps.current_metrics.search.corpus_index.labels(outcome=outcome).inc()
+    deps.current_metrics.search.term_weights_unavailable.labels(reason=reason).inc()
+    return {"term_weights": None, "term_weights_error": error}
+
+
 async def local_search(state: dict, deps: SearchDeps) -> dict:
     """Выполнить локальный гибридный поиск с собственным таймаутом."""
 
@@ -181,9 +250,12 @@ async def external_search(state: dict, deps: SearchDeps) -> dict:
     # `page_limit` карточек, и все они должны пройти единую оценку, иначе
     # сравнение шло бы только по тем, что случайно попали в короткий список.
     limit = deps.settings.external.page_limit
+    term_weights = state.get("term_weights")
     try:
         async with asyncio.timeout(timeout):
-            result = await source.search(state["query"], limit=limit)
+            result = await source.search(
+                state["query"], limit=limit, term_weights=term_weights
+            )
     except TimeoutError:
         result = ExternalSearchResult(
             status=ExternalStatus.UNAVAILABLE,
@@ -455,6 +527,7 @@ def format_response(state: dict, deps: SearchDeps | None = None) -> dict:
         answer=answer,
         request_id=state.get("request_id"),
         truncated_query=truncated_query,
+        degraded=bool(state.get("term_weights_error")),
     )
 
     started_at = state.get("started_at")
@@ -498,12 +571,15 @@ def _record_metrics(
             )
 
     if outcome.is_partial:
+        failed = list(outcome.failed_sources)
+        if outcome.degraded:
+            failed.append("corpus_index")
         logger.warning(
             "поиск завершён с частичными результатами",
             operation="search",
             status="partial",
             duration_seconds=round(duration, 4),
-            sources=outcome.failed_sources,
+            sources=failed,
             request_id=outcome.request_id,
         )
 
@@ -529,6 +605,7 @@ def _generation_prompt(query: str, matches: list[SearchMatch]) -> str:
 
 __all__ = [
     "SearchDeps",
+    "ensure_corpus_index",
     "external_search",
     "format_response",
     "generate",

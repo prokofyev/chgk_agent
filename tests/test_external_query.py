@@ -3,6 +3,7 @@
 import pytest
 
 from chgk_agent.external.query import ShortQueryBuilder, build_short_queries
+from chgk_agent.search.lexical import tokenize
 
 LONG_DESCRIPTION = (
     "В докладе 1947 года этот человек предложил использовать две комнаты, "
@@ -27,46 +28,84 @@ def test_description_at_exact_limit_is_not_truncated() -> None:
     assert plan.truncated is False
 
 
-def test_long_description_produces_short_queries() -> None:
+def test_long_description_produces_one_term_per_query() -> None:
+    """Каждый запрос несёт ровно один термин: сайт считает слова конъюнкцией."""
+
     plan = build_short_queries(LONG_DESCRIPTION)
 
     assert plan.truncated is True
     assert plan.queries
+    assert all(" " not in query for query in plan.queries)
     assert all(len(query) <= 50 for query in plan.queries)
 
 
-def test_long_description_keeps_key_terms() -> None:
-    plan = build_short_queries(LONG_DESCRIPTION)
+def test_rare_term_beats_long_common_word() -> None:
+    """Редкое короткое слово вытесняет частое длинное."""
 
-    joined = " ".join(plan.queries).casefold()
-    assert "1947" in joined
-    assert "шахматы" in joined
+    description = "жираф альфа бета гамма дельта стеклоочиститель дополнительно"
+    weights = {
+        tokenize("жираф")[0]: 5.0,
+        tokenize("альфа")[0]: 3.0,
+        tokenize("бета")[0]: 3.0,
+        tokenize("гамма")[0]: 3.0,
+        tokenize("дельта")[0]: 3.0,
+        tokenize("стеклоочиститель")[0]: 0.1,
+    }
 
-
-def test_proper_nouns_are_prioritized() -> None:
     plan = build_short_queries(
-        "Английский учёный прошлого века Ангус Бейтмен во время экспериментов "
-        "давал ИМ клички: Щетинка, Лысый, Волосатое крыло. Назовите ИХ."
+        description, max_queries=1, term_weights=weights
     )
 
-    assert "Бейтмен" in plan.primary
+    assert plan.queries == ["жираф"]
 
 
-def test_every_query_respects_the_limit() -> None:
-    builder = ShortQueryBuilder(max_chars=30, max_queries=5)
+def test_number_of_requests_is_limited() -> None:
+    """Число запросов не превышает настроенный бюджет."""
+
+    builder = ShortQueryBuilder(max_chars=50, max_queries=2)
 
     plan = builder.build(LONG_DESCRIPTION)
+
+    assert len(plan.queries) == 2
+    assert builder.max_queries == 2
+
+
+def test_most_informative_terms_are_chosen_first() -> None:
+    """В бюджет попадают самые информативные термины."""
+
+    description = "жираф альфа бета гамма дельта эпсилон дзета эта тета йота каппа"
+    weights = {
+        tokenize("жираф")[0]: 1.0,
+        tokenize("альфа")[0]: 5.0,
+        tokenize("бета")[0]: 4.0,
+        tokenize("гамма")[0]: 0.5,
+    }
+
+    plan = build_short_queries(description, max_queries=2, term_weights=weights)
+
+    assert plan.queries == ["альфа", "бета"]
+
+
+def test_terms_outside_corpus_are_informative() -> None:
+    """Без весов запрос всё равно формируется и не пуст."""
+
+    description = "Неизвестное описание с редкими словами " * 3
+
+    plan = build_short_queries(description)
 
     assert plan.queries
-    assert all(len(query) <= 30 for query in plan.queries)
+    assert all(query for query in plan.queries)
 
 
-def test_number_of_queries_is_limited() -> None:
-    builder = ShortQueryBuilder(max_chars=12, max_queries=2)
+def test_proper_nouns_are_prioritized_without_weights() -> None:
+    """Без весов имя собственное обходит более длинное знаменательное слово."""
 
-    plan = builder.build(LONG_DESCRIPTION)
+    plan = build_short_queries(
+        "Обычное длинное описание про необычный галстук и шляпу. Ангус Бейтмен.",
+        max_queries=1,
+    )
 
-    assert len(plan.queries) <= 2
+    assert plan.primary == "Бейтмен"
 
 
 def test_stopwords_are_dropped() -> None:
@@ -74,9 +113,20 @@ def test_stopwords_are_dropped() -> None:
         "И вот этот самый человек, который был там, назвал именно это слово. Назовите его."
     )
 
-    assert plan.queries
-    primary = plan.primary.casefold()
-    assert "который" not in primary
+    joined = " ".join(plan.queries).casefold()
+    assert "который" not in joined
+
+
+def test_repeated_stem_is_not_duplicated() -> None:
+    """Повтор основы не занимает бюджет запросов дважды."""
+
+    description = "Галстук галстуки галстуков и шляпа " * 3
+    weights = {tokenize("галстуки")[0]: 5.0, tokenize("шляпа")[0]: 4.0}
+
+    plan = build_short_queries(description, max_queries=2, term_weights=weights)
+
+    stems = [tokenize(query)[0] for query in plan.queries]
+    assert len(stems) == len(set(stems))
 
 
 def test_empty_description_gives_no_queries() -> None:

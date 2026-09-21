@@ -125,6 +125,31 @@ def test_normalize_bm25_handles_zero_saturation() -> None:
     assert normalize_bm25(5.0, saturation=0.0) == pytest.approx(1.0)
 
 
+def test_rare_term_is_more_informative_than_common_term() -> None:
+    """Информативность убывает с ростом документной частоты."""
+
+    index = Bm25Index()
+    index.add("a", "галстук и шляпа")
+    for number in range(30):
+        index.add(f"c{number}", "и шляпа")
+
+    assert index.document_frequency("галстук") == 1
+    assert index.document_frequency("шляп") > 1
+    assert index.idf("галстук") > index.idf("шляп")
+
+
+def test_term_outside_corpus_has_maximum_informativeness() -> None:
+    """Термин вне корпуса информативнее самого редкого корпусного."""
+
+    index = Bm25Index()
+    index.add("a", "галстук")
+    for number in range(30):
+        index.add(f"c{number}", "и шляпа")
+
+    assert index.document_frequency("жираф") == 0
+    assert index.idf("жираф") > index.idf("галстук")
+
+
 def test_collection_statistics_span_all_documents() -> None:
     """Редкость термина считается по всей коллекции, а не по одному документу."""
 

@@ -37,6 +37,30 @@ def test_query_limit_above_site_limit_is_rejected() -> None:
         Settings(_env_file=None, external={"max_query_chars": 51})
 
 
+def test_external_query_budget_is_setting() -> None:
+    """Бюджет коротких запросов к внешнему источнику задаётся настройкой."""
+
+    settings = Settings(_env_file=None)
+
+    assert settings.external.max_query_terms == 3
+
+
+def test_external_query_term_limit_is_bounded() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, external={"max_query_terms": 0})
+
+
+def test_corpus_index_timeout_is_setting() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.search.corpus_index_timeout_seconds == pytest.approx(2.0)
+
+
+def test_corpus_index_timeout_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, search={"corpus_index_timeout_seconds": 0})
+
+
 def test_settings_read_nested_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CHGK_EXTERNAL__ENABLED", "false")
     monkeypatch.setenv("CHGK_EXTERNAL__BASE_URL", "https://example.test")
